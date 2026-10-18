@@ -35,11 +35,31 @@ export class TelegramBotManager {
     return TelegramBotManager.instance;
   }
 
-  private isAuthorizedAdmin(username?: string): boolean {
-    if (!username) return false;
-    const clean = username.toLowerCase().replace(/^@/, '');
-    const allowed = config.settings.allowed_admin_usernames.map(u => u.toLowerCase().replace(/^@/, ''));
-    return allowed.includes(clean);
+  private isAuthorizedAdmin(input?: any): boolean {
+    if (!input) return false;
+    let username: string | undefined;
+    let userId: number | undefined;
+
+    if (typeof input === 'string') {
+      username = input;
+    } else if (typeof input === 'number') {
+      userId = input;
+    } else if (typeof input === 'object') {
+      username = input.username;
+      userId = input.id;
+    }
+
+    if (userId && config.settings.admin_chat_ids && config.settings.admin_chat_ids.includes(userId)) {
+      return true;
+    }
+
+    if (username) {
+      const clean = username.toLowerCase().replace(/^@/, '');
+      const allowed = config.settings.allowed_admin_usernames.map(u => u.toLowerCase().replace(/^@/, ''));
+      if (allowed.includes(clean)) return true;
+    }
+
+    return false;
   }
 
   private get restrictedUsername(): string {
@@ -375,19 +395,31 @@ export class TelegramBotManager {
       targetChatIds.add(config.settings.report_group_id);
     }
 
-    if (targetChatIds.size === 0) {
-      console.warn('[Telegram] No admin chat IDs recorded yet for approval mode.');
-    }
-
+    let deliveredCount = 0;
     for (const chatId of targetChatIds) {
       try {
         await this.bot.api.sendMessage(chatId, promptText, {
           parse_mode: 'HTML',
           reply_markup: kb
         });
+        deliveredCount++;
       } catch (err) {
         console.error(`[Telegram] Failed to send approval request to ${chatId}:`, err);
       }
+    }
+
+    if (deliveredCount === 0) {
+      console.warn('[Telegram] Approval card could not be delivered to any admin chat. Broadcasting directly to avoid dropping post.');
+      await dispatcher.broadcastForChannel({
+        channel,
+        mediaType,
+        filePath,
+        fileName,
+        caption: msg.caption || '',
+        rawText: msg.text,
+        source,
+        postId
+      });
     }
   }
 
@@ -446,15 +478,28 @@ export class TelegramBotManager {
       targetChatIds.add(config.settings.report_group_id);
     }
 
+    let deliveredCount = 0;
     for (const chatId of targetChatIds) {
       try {
         await this.bot.api.sendMessage(chatId, promptText, {
           parse_mode: 'HTML',
           reply_markup: kb
         });
+        deliveredCount++;
       } catch (err) {
         console.error(`[Telegram] Failed to send album approval to ${chatId}:`, err);
       }
+    }
+
+    if (deliveredCount === 0) {
+      console.warn('[Telegram] Album approval card could not be delivered to any admin chat. Broadcasting directly.');
+      await dispatcher.broadcastAlbumForChannel({
+        channel,
+        items,
+        caption,
+        source,
+        postId
+      });
     }
   }
 
@@ -664,7 +709,7 @@ export class TelegramBotManager {
 
     // Auto-record admin chat IDs whenever an authorized admin interacts
     this.bot.use(async (ctx, next) => {
-      if (ctx.from && this.isAuthorizedAdmin(ctx.from.username)) {
+      if (ctx.from && this.isAuthorizedAdmin(ctx.from)) {
         config.addAdminChatId(ctx.from.id);
       }
       return next();
@@ -843,10 +888,13 @@ export class TelegramBotManager {
 
     // ================= Admin PV Commands =================
     this.bot.command(['start', 'admin', 'menu', 'status'], async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         await ctx.reply(
-          '⛔ <b>دسترسی غیرمجاز!</b>\n\n' +
-          'این ربات خصوصی بوده و فقط برای ادمین‌های مجاز فعال است.',
+          `⛔ <b>دسترسی غیرمجاز!</b>\n\n` +
+          `این ربات خصوصی بوده و فقط برای ادمین‌های مجاز فعال است.\n\n` +
+          `🔹 شناسه عددی شما: <code>${ctx.from?.id}</code>\n` +
+          `🔹 نام کاربری شما: <code>${ctx.from?.username ? '@' + ctx.from.username : '(ندارد)'}</code>\n\n` +
+          `جهت دسترسی، شناسه عددی بالا را در لیست ادمین‌ها وارد کنید.`,
           { parse_mode: 'HTML' }
         );
         return;
@@ -1330,10 +1378,21 @@ export class TelegramBotManager {
 
       // In groups: ONLY respond when explicitly tagged/mentioned or replied directly to this bot's own message.
       // In private: respond to authorized admins who talk to the bot.
-      const shouldRespond = isGroup ? (isMentioned || isReplyToBot) : this.isAuthorizedAdmin(ctx.from?.username);
-
-      if (!shouldRespond) {
-        return next();
+      if (!isGroup) {
+        if (!this.isAuthorizedAdmin(ctx.from)) {
+          await ctx.reply(
+            `⛔ <b>دسترسی غیرمجاز!</b>\n\n` +
+            `🔹 شناسه عددی شما: <code>${ctx.from?.id}</code>\n` +
+            `🔹 نام کاربری شما: <code>${ctx.from?.username ? '@' + ctx.from.username : '(ندارد)'}</code>\n\n` +
+            `جهت فعال‌سازی دسترسی، این شناسه را به عنوان ادمین ثبت کنید.`,
+            { parse_mode: 'HTML' }
+          );
+          return;
+        }
+      } else {
+        if (!isMentioned && !isReplyToBot) {
+          return next();
+        }
       }
 
       const replyOptions: any = {
