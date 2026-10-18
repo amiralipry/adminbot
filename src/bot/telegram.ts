@@ -709,6 +709,9 @@ export class TelegramBotManager {
 
     // Auto-record admin chat IDs whenever an authorized admin interacts
     this.bot.use(async (ctx, next) => {
+      if (ctx.message?.text) {
+        console.log(`[Telegram Inbound] From: @${ctx.from?.username || 'none'} (${ctx.from?.id}) | Chat: ${ctx.chat?.id} | Text: "${ctx.message.text}"`);
+      }
       if (ctx.from && this.isAuthorizedAdmin(ctx.from)) {
         config.addAdminChatId(ctx.from.id);
       }
@@ -733,11 +736,13 @@ export class TelegramBotManager {
         const existing = this.albumBuffer.get(mgId);
 
         if (!existing) {
-          const timer = setTimeout(async () => {
+          const timer = setTimeout(() => {
             const entry = this.albumBuffer.get(mgId);
             this.albumBuffer.delete(mgId);
             if (entry) {
-              await this.processAlbum(entry.messages, matched);
+              this.processAlbum(entry.messages, matched).catch((err) => {
+                console.error('[Telegram] Error in processAlbum:', err);
+              });
             }
           }, 1500);
 
@@ -748,8 +753,10 @@ export class TelegramBotManager {
         return;
       }
 
-      // Single message
-      await this.processChannelMessage(ctx.channelPost, matched);
+      // Single message (processed in background so it never blocks Telegram update polling)
+      this.processChannelMessage(ctx.channelPost, matched).catch((err) => {
+        console.error('[Telegram] Error in processChannelMessage:', err);
+      });
     });
 
     // ================= Auto-Detect Sikaap Social Group & Commands =================
@@ -888,15 +895,21 @@ export class TelegramBotManager {
 
     // ================= Admin PV Commands =================
     this.bot.command(['start', 'admin', 'menu', 'status'], async (ctx) => {
+      console.log(`[Telegram CMD] /start received from: @${ctx.from?.username || 'none'} (${ctx.from?.id})`);
       if (!this.isAuthorizedAdmin(ctx.from)) {
-        await ctx.reply(
-          `⛔ <b>دسترسی غیرمجاز!</b>\n\n` +
-          `این ربات خصوصی بوده و فقط برای ادمین‌های مجاز فعال است.\n\n` +
-          `🔹 شناسه عددی شما: <code>${ctx.from?.id}</code>\n` +
-          `🔹 نام کاربری شما: <code>${ctx.from?.username ? '@' + ctx.from.username : '(ندارد)'}</code>\n\n` +
-          `جهت دسترسی، شناسه عددی بالا را در لیست ادمین‌ها وارد کنید.`,
-          { parse_mode: 'HTML' }
-        );
+        console.warn(`[Telegram CMD] Unauthorized /start attempt from: @${ctx.from?.username || 'none'} (${ctx.from?.id})`);
+        try {
+          await ctx.reply(
+            `⛔ <b>دسترسی غیرمجاز!</b>\n\n` +
+            `این ربات خصوصی بوده و فقط برای ادمین‌های مجاز فعال است.\n\n` +
+            `🔹 شناسه عددی شما: <code>${ctx.from?.id}</code>\n` +
+            `🔹 نام کاربری شما: <code>${ctx.from?.username ? '@' + ctx.from.username : '(ندارد)'}</code>\n\n` +
+            `جهت دسترسی، شناسه عددی بالا را در لیست ادمین‌ها وارد کنید.`,
+            { parse_mode: 'HTML' }
+          );
+        } catch (err: any) {
+          console.error('[Telegram CMD] Error replying to unauthorized user:', err);
+        }
         return;
       }
 
@@ -909,22 +922,31 @@ export class TelegramBotManager {
           .row()
           .text('⏰ پست‌های زمان‌بندی‌شده من', 'cb:list_scheduled');
 
-        await ctx.reply(
-          `سلام <b>${userName}</b> عزیز خوش آمدید! 🌸\n\n` +
-          `شما دسترسی محتواگذاری برای کانال <b>یاکاشف الکرب</b> را دارید.\n\n` +
-          `🔹 کافیست هر ویدیو، عکس، وویس یا فایلی که می‌خواهید را مستقیماً در این چت ارسال نمایید تا به سادگی به صورت فوری یا با <b>زمان‌بندی (تایم‌بندی)</b> در کانال و پیام‌رسان‌های متصل بازنشر شود.`,
-          {
-            parse_mode: 'HTML',
-            reply_markup: yakashefKb
-          }
-        );
+        try {
+          await ctx.reply(
+            `سلام <b>${userName}</b> عزیز خوش آمدید! 🌸\n\n` +
+            `شما دسترسی محتواگذاری برای کانال <b>یاکاشف الکرب</b> را دارید.\n\n` +
+            `🔹 کافیست هر ویدیو، عکس، وویس یا فایلی که می‌خواهید را مستقیماً در این چت ارسال نمایید تا به سادگی به صورت فوری یا با <b>زمان‌بندی (تایم‌بندی)</b> در کانال و پیام‌رسان‌های متصل بازنشر شود.`,
+            {
+              parse_mode: 'HTML',
+              reply_markup: yakashefKb
+            }
+          );
+        } catch (err: any) {
+          console.error('[Telegram CMD] Error replying to restricted admin:', err);
+        }
         return;
       }
 
-      await ctx.reply(this.renderMainMenuHtml(userName), {
-        parse_mode: 'HTML',
-        reply_markup: this.getMainMenuKeyboard()
-      });
+      try {
+        await ctx.reply(this.renderMainMenuHtml(userName), {
+          parse_mode: 'HTML',
+          reply_markup: this.getMainMenuKeyboard()
+        });
+        console.log(`[Telegram CMD] Main menu sent successfully to @${ctx.from?.username || 'none'} (${ctx.from?.id})`);
+      } catch (err: any) {
+        console.error('[Telegram CMD] Error sending main menu:', err);
+      }
     });
 
     // ================= Scheduled Posts Command (/scheduled, /schedule) =================
