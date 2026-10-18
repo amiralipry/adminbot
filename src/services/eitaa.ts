@@ -7,7 +7,7 @@ export class EitaaService {
   }
 
   private get apiType(): string {
-    return config.settings.eitaa_api_type.trim().toLowerCase();
+    return (config.settings.eitaa_api_type || 'eitaayar').trim().toLowerCase();
   }
 
   public isEnabled(): boolean {
@@ -33,30 +33,21 @@ export class EitaaService {
     try {
       const url = `${this.getBaseUrl()}getMe`;
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      const text = await res.text();
+      const data = await res.json() as any;
 
-      let data: any = {};
-      try {
-        data = JSON.parse(text);
-      } catch {
-        return {
-          success: res.ok,
-          platform: 'eitaa',
-          message_id: text.slice(0, 50)
-        };
-      }
-
-      if (data?.status === true || data?.ok === true || res.ok) {
+      if (data?.ok === true || data?.status === true) {
+        const name = data.result?.first_name || data.result?.username || 'Eitaayar Bot';
+        const user = data.result?.username ? ` (@${data.result.username})` : '';
         return {
           success: true,
           platform: 'eitaa',
-          message_id: 'Connected'
+          message_id: `متصل: ${name}${user}`
         };
       }
       return {
         success: false,
         platform: 'eitaa',
-        error: data?.message || data?.description || `HTTP ${res.status}`
+        error: data?.description || data?.message || `HTTP ${res.status}`
       };
     } catch (err: any) {
       return { success: false, platform: 'eitaa', error: `خطا در ارتباط با ایتا: ${err.message}` };
@@ -68,31 +59,23 @@ export class EitaaService {
     if (!this.isConfigured()) return { success: false, platform: 'eitaa', error: 'توکن ایتا تنظیم نشده است.' };
     if (!targetChannel) return { success: false, platform: 'eitaa', error: 'کانال مقصد ایتا مشخص نشده است.' };
 
+    const cleanChatId = targetChannel.replace(/^@/, '').trim();
     const url = `${this.getBaseUrl()}sendMessage`;
 
     try {
-      let res: Response;
-      if (this.apiType === 'direct') {
-        res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: targetChannel, text }),
-          signal: AbortSignal.timeout(20000)
-        });
-      } else {
-        const form = new FormData();
-        form.append('chat_id', targetChannel);
-        form.append('text', text);
-        res = await fetch(url, {
-          method: 'POST',
-          body: form,
-          signal: AbortSignal.timeout(20000)
-        });
-      }
+      const form = new FormData();
+      form.append('chat_id', cleanChatId);
+      form.append('text', text);
+
+      const res = await fetch(url, {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(25000)
+      });
 
       const data = await res.json() as any;
-      if (data?.status === true || data?.ok === true || res.ok) {
-        const msgId = data?.data?.message_id || data?.result?.message_id;
+      if (data?.ok === true || data?.status === true) {
+        const msgId = data?.result?.message_id || data?.data?.message_id;
         return {
           success: true,
           platform: 'eitaa',
@@ -104,7 +87,7 @@ export class EitaaService {
         success: false,
         platform: 'eitaa',
         channel: targetChannel,
-        error: data?.message || data?.description || `HTTP ${res.status}`
+        error: data?.description || data?.message || `خطای ایتا (کد ${data?.error_code || res.status})`
       };
     } catch (err: any) {
       return {
@@ -127,40 +110,26 @@ export class EitaaService {
     if (!this.isConfigured()) return { success: false, platform: 'eitaa', error: 'توکن ایتا تنظیم نشده است.' };
     if (!targetChannel) return { success: false, platform: 'eitaa', error: 'کانال مقصد ایتا مشخص نشده است.' };
 
+    const cleanChatId = targetChannel.replace(/^@/, '').trim();
     const baseUrl = this.getBaseUrl();
     const blob = fileData instanceof Blob ? fileData : new Blob([fileData]);
     const form = new FormData();
-    form.append('chat_id', targetChannel);
+    form.append('chat_id', cleanChatId);
+    form.append('file', blob, fileName);
+    if (caption) form.append('caption', caption);
 
-    let url: string;
-    if (this.apiType === 'direct') {
-      const methodMap: Record<string, string> = {
-        photo: 'sendPhoto',
-        video: 'sendVideo',
-        document: 'sendDocument',
-        voice: 'sendVoice',
-        audio: 'sendAudio'
-      };
-      const method = methodMap[mediaType] || 'sendDocument';
-      url = `${baseUrl}${method}`;
-      form.append('file', blob, fileName);
-      if (caption) form.append('caption', caption);
-    } else {
-      url = `${baseUrl}sendFile`;
-      form.append('file', blob, fileName);
-      if (caption) form.append('caption', caption);
-    }
+    const url = `${baseUrl}sendFile`;
 
     try {
       const res = await fetch(url, {
         method: 'POST',
         body: form,
-        signal: AbortSignal.timeout(60000)
+        signal: AbortSignal.timeout(90000)
       });
       const data = await res.json() as any;
 
-      if (data?.status === true || data?.ok === true || res.ok) {
-        const msgId = data?.data?.message_id || data?.result?.message_id;
+      if (data?.ok === true || data?.status === true) {
+        const msgId = data?.result?.message_id || data?.data?.message_id;
         return {
           success: true,
           platform: 'eitaa',
@@ -172,7 +141,7 @@ export class EitaaService {
         success: false,
         platform: 'eitaa',
         channel: targetChannel,
-        error: data?.message || data?.description || `HTTP ${res.status}`
+        error: data?.description || data?.message || `خطای ایتا (کد ${data?.error_code || res.status})`
       };
     } catch (err: any) {
       return {
