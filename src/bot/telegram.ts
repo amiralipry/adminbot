@@ -1,11 +1,14 @@
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
+import { join } from 'path';
+import { existsSync, mkdirSync, statSync, unlinkSync } from 'fs';
 import { config } from '../config';
 import { dispatcher } from '../services/dispatcher';
 import { statsService } from '../services/stats';
 import { dailyReportScheduler } from '../services/scheduler';
 import { geminiService } from '../services/gemini';
 import { postScheduler } from '../services/postScheduler';
-import type { ChannelProfile } from '../types';
+import { botDb } from '../services/db';
+import type { ChannelProfile, PendingApprovalPost } from '../types';
 
 export class TelegramBotManager {
   private static instance: TelegramBotManager;
@@ -15,17 +18,8 @@ export class TelegramBotManager {
   private albumBuffer: Map<string, { messages: any[]; timer: any }> = new Map();
   private pendingUploads: Map<string, { mediaType: string; fileId: string; fileName: string; caption?: string; date: number }> = new Map();
   private pendingSchedule: Map<string, { targetId: string; uploadKey: string; timestamp: number }> = new Map();
-  public pendingApprovals: Map<string, {
-    id: string;
-    channel: ChannelProfile;
-    mediaType: string;
-    fileId?: string;
-    text?: string;
-    caption?: string;
-    source: string;
-    postId: string;
-    date: number;
-  }> = new Map();
+  public pendingApprovals: Map<string, PendingApprovalPost> = new Map();
+  private adminEditSessions: Map<number, { approvalId: string; platform: 'all' | 'bale' | 'rubika' | 'eitaa' }> = new Map();
   private pendingChannelWizard: Map<number, {
     step: 'title' | 'telegram_id' | 'bale_id' | 'rubika_id';
     data: Partial<ChannelProfile>;
@@ -278,6 +272,46 @@ export class TelegramBotManager {
     }
   }
 
+  public transformLinksForPlatforms(text: string, channel: ChannelProfile): { bale: string; rubika: string; eitaa: string } {
+    const tgClean = channel.telegram_id.replace(/^@/, '');
+    const baleClean = channel.bale_id ? channel.bale_id.replace(/^@/, '') : tgClean;
+    const rubikaClean = channel.rubika_id ? channel.rubika_id.replace(/^@/, '') : tgClean;
+    const eitaaClean = channel.eitaa_id ? channel.eitaa_id.replace(/^@/, '') : tgClean;
+
+    const tgRegex = new RegExp(`(?:https?://)?(?:t\\.me/|@)${tgClean}\\b`, 'gi');
+    const tgLinkRegex = new RegExp(`https?://t\\.me/${tgClean}\\b`, 'gi');
+
+    let baleText = text
+      .replace(tgLinkRegex, `https://ble.ir/${baleClean}`)
+      .replace(tgRegex, `@${baleClean}`);
+
+    let rubikaText = text
+      .replace(tgLinkRegex, `https://rubika.ir/${rubikaClean}`)
+      .replace(tgRegex, `@${rubikaClean}`);
+
+    let eitaaText = text
+      .replace(tgLinkRegex, `https://eitaa.com/${eitaaClean}`)
+      .replace(tgRegex, `@${eitaaClean}`);
+
+    return { bale: baleText, rubika: rubikaText, eitaa: eitaaText };
+  }
+
+  public getApprovalKeyboard(approvalId: string): InlineKeyboard {
+    return new InlineKeyboard()
+      .text('✅ تایید و ارسال سراسری', `cb:appr_ok:${approvalId}`)
+      .text('❌ لغو ارسال', `cb:appr_no:${approvalId}`)
+      .row()
+      .text('✏️ ویرایش متن', `cb:appr_edit:${approvalId}`)
+      .text('✨ بهینه‌سازی با هوش مصنوعی', `cb:appr_ai:${approvalId}`)
+      .row()
+      .text('🔗 تبدیل هوشمند لینک‌ها', `cb:appr_links:${approvalId}`)
+      .text('👁️ پیش‌نمایش پلتفرم‌ها', `cb:appr_preview:${approvalId}`)
+      .row()
+      .text('🍃 فقط بله', `cb:appr_send:bale:${approvalId}`)
+      .text('🟣 فقط روبیکا', `cb:appr_send:rubika:${approvalId}`)
+      .text('🟠 فقط ایتا', `cb:appr_send:eitaa:${approvalId}`);
+  }
+
   private async requestApprovalForPost(msg: any, channel: ChannelProfile, mediaType: string, fileId?: string): Promise<void> {
     if (!this.bot) return;
 
@@ -285,24 +319,44 @@ export class TelegramBotManager {
     const source = msg.chat?.username ? `@${msg.chat.username}` : channel.title;
     const postId = String(msg.message_id);
 
-    this.pendingApprovals.set(approvalId, {
+    let filePath: string | undefined;
+    let fileName: string | undefined;
+
+    // Stream download immediately to data/temp to avoid holding in RAM
+    if (fileId) {
+      try {
+        const dl = await this.downloadTelegramFileStream(fileId);
+        filePath = dl.filePath;
+        fileName = dl.fileName;
+      } catch (dlErr) {
+        console.error('[Telegram] Error downloading stream for approval:', dlErr);
+      }
+    }
+
+    const approvalPost: PendingApprovalPost = {
       id: approvalId,
+      channelId: channel.id,
+      channelTitle: channel.title,
       channel,
       mediaType,
       fileId,
+      filePath,
+      fileName,
       text: msg.text,
       caption: msg.caption,
       source,
       postId,
+      createdAt: Date.now(),
       date: Date.now()
-    });
+    };
+
+    botDb.savePendingApproval(approvalPost);
+    this.pendingApprovals.set(approvalId, approvalPost);
 
     const mediaFa = mediaType === 'video' ? 'ویدیو' : (mediaType === 'photo' ? 'تصویر' : (mediaType === 'text' ? 'متن' : 'فایل'));
     const contentPreview = (msg.text || msg.caption || '(بدون کپشن/متن)').slice(0, 300);
 
-    const kb = new InlineKeyboard()
-      .text('✅ تایید و ارسال به پیام‌رسان‌ها', `cb:appr_ok:${approvalId}`)
-      .text('❌ لغو ارسال', `cb:appr_no:${approvalId}`);
+    const kb = this.getApprovalKeyboard(approvalId);
 
     const promptText = (
       `📋 <b>پست جدید در انتظار تایید ادمین برای بازنشر!</b>\n\n` +
@@ -310,7 +364,7 @@ export class TelegramBotManager {
       `📦 <b>نوع محتوا:</b> ${mediaFa}\n\n` +
       `📝 <b>پیش‌نمایش محتوا:</b>\n` +
       `<i>${contentPreview}</i>\n\n` +
-      `👇 لطفاً بررسی کرده و در صورت تایید دکمه ارسال را بزنید:`
+      `👇 لطفاً بررسی کرده و از دکمه‌های زیر برای تایید، ویرایش یا بهینه‌سازی استفاده کنید:`
     );
 
     const targetChatIds = new Set<string | number>();
@@ -337,6 +391,98 @@ export class TelegramBotManager {
     }
   }
 
+  private async requestApprovalForAlbum(params: {
+    channel: ChannelProfile;
+    items: { mediaType: string; fileId: string; filePath: string; fileName: string }[];
+    caption?: string;
+    source: string;
+    postId: string;
+  }): Promise<void> {
+    if (!this.bot) return;
+    const { channel, items, caption = '', source, postId } = params;
+    const approvalId = `appr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+    const approvalPost: PendingApprovalPost = {
+      id: approvalId,
+      channelId: channel.id,
+      channelTitle: channel.title,
+      channel,
+      mediaType: 'album',
+      caption,
+      isAlbum: true,
+      albumItems: items.map((it, idx) => ({
+        messageId: idx + 1,
+        mediaType: it.mediaType,
+        fileId: it.fileId,
+        fileName: it.fileName,
+        caption: idx === 0 ? caption : undefined
+      })),
+      source,
+      postId,
+      createdAt: Date.now(),
+      date: Date.now()
+    };
+
+    botDb.savePendingApproval(approvalPost);
+    this.pendingApprovals.set(approvalId, approvalPost);
+
+    const kb = this.getApprovalKeyboard(approvalId);
+    const contentPreview = (caption || '(بدون کپشن)').slice(0, 300);
+
+    const promptText = (
+      `📸 <b>آلبوم جدید (${items.length} رسانه) در انتظار تایید ادمین!</b>\n\n` +
+      `📢 <b>کانال مبدأ:</b> <b>${channel.title}</b> (<code>${channel.telegram_id}</code>)\n` +
+      `📦 <b>تعداد اقلام:</b> ${items.length} آیتم چندرسانه‌ای\n\n` +
+      `📝 <b>کپشن آلبوم:</b>\n` +
+      `<i>${contentPreview}</i>\n\n` +
+      `👇 جهت انتشار منسجم در بله، روبیکا و ایتا انتخاب نمایید:`
+    );
+
+    const targetChatIds = new Set<string | number>();
+    if (config.settings.admin_chat_ids) {
+      for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
+    }
+    if (config.settings.report_group_id) {
+      targetChatIds.add(config.settings.report_group_id);
+    }
+
+    for (const chatId of targetChatIds) {
+      try {
+        await this.bot.api.sendMessage(chatId, promptText, {
+          parse_mode: 'HTML',
+          reply_markup: kb
+        });
+      } catch (err) {
+        console.error(`[Telegram] Failed to send album approval to ${chatId}:`, err);
+      }
+    }
+  }
+
+  public async downloadTelegramFileStream(fileId: string): Promise<{ filePath: string; fileName: string; fileSize: number }> {
+    if (!this.bot) throw new Error('Bot not initialized');
+    const file = await this.bot.api.getFile(fileId);
+    if (!file.file_path) throw new Error('File path not found');
+
+    const token = config.settings.telegram_bot_token.trim();
+    const downloadUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+    const rawFileName = file.file_path.split('/').pop() || `file_${Date.now()}`;
+    const tempDir = join(process.cwd(), 'data', 'temp');
+    if (!existsSync(tempDir)) {
+      mkdirSync(tempDir, { recursive: true });
+    }
+    const cleanFileName = rawFileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const targetPath = join(tempDir, `dl_${Date.now()}_${cleanFileName}`);
+
+    const res = await fetch(downloadUrl);
+    if (!res.ok || !res.body) {
+      throw new Error(`خطا در دانلود فایل تلگرام: ${res.status}`);
+    }
+
+    await Bun.write(targetPath, res);
+    const size = statSync(targetPath).size;
+    return { filePath: targetPath, fileName: rawFileName, fileSize: size };
+  }
+
   private async downloadTelegramFile(fileId: string): Promise<{ data: ArrayBuffer; fileName: string }> {
     if (!this.bot) throw new Error('Bot not initialized');
     const file = await this.bot.api.getFile(fileId);
@@ -349,6 +495,75 @@ export class TelegramBotManager {
     const fileName = file.file_path.split('/').pop() || 'file';
 
     return { data, fileName };
+  }
+
+  private async processAlbum(messages: any[], channel: ChannelProfile): Promise<void> {
+    if (messages.length === 0) return;
+    const firstMsg = messages[0];
+    const postId = `album_${firstMsg.message_id}`;
+    const source = firstMsg.chat?.username ? `@${firstMsg.chat.username}` : channel.title;
+
+    statsService.recordChannelPost({ channel, mediaType: 'album', postId });
+
+    let commonCaption = '';
+    for (const m of messages) {
+      if (m.caption) {
+        commonCaption = m.caption;
+        break;
+      }
+    }
+
+    const items: { mediaType: string; fileId: string; filePath: string; fileName: string }[] = [];
+
+    for (const m of messages) {
+      let mediaType = 'photo';
+      let fileId = '';
+      if (m.photo) {
+        mediaType = 'photo';
+        fileId = m.photo[m.photo.length - 1].file_id;
+      } else if (m.video) {
+        mediaType = 'video';
+        fileId = m.video.file_id;
+      } else if (m.document) {
+        mediaType = 'document';
+        fileId = m.document.file_id;
+      }
+
+      if (fileId) {
+        try {
+          const dl = await this.downloadTelegramFileStream(fileId);
+          items.push({
+            mediaType,
+            fileId,
+            filePath: dl.filePath,
+            fileName: dl.fileName
+          });
+        } catch (err) {
+          console.error('[Telegram] Error downloading album item:', err);
+        }
+      }
+    }
+
+    if (items.length === 0) return;
+
+    if (config.settings.approval_mode_enabled) {
+      await this.requestApprovalForAlbum({
+        channel,
+        items,
+        caption: commonCaption,
+        source,
+        postId
+      });
+      return;
+    }
+
+    await dispatcher.broadcastAlbumForChannel({
+      channel,
+      items,
+      caption: commonCaption,
+      source,
+      postId
+    });
   }
 
   private async processChannelMessage(msg: any, channel: ChannelProfile): Promise<void> {
@@ -379,7 +594,6 @@ export class TelegramBotManager {
     }
 
     // Immediately record that this channel published a post today on Telegram
-    // (Regardless of whether cross-posting succeeds or fails)
     statsService.recordChannelPost({
       channel,
       mediaType,
@@ -405,14 +619,14 @@ export class TelegramBotManager {
       return;
     }
 
-    // 2. Media
+    // 2. Media with streaming from disk
     if (fileId) {
       try {
-        const { data, fileName } = await this.downloadTelegramFile(fileId);
+        const { filePath, fileName } = await this.downloadTelegramFileStream(fileId);
         await dispatcher.broadcastForChannel({
           channel,
           mediaType,
-          fileData: data,
+          filePath,
           fileName,
           caption: msg.caption || '',
           source,
@@ -478,9 +692,7 @@ export class TelegramBotManager {
             const entry = this.albumBuffer.get(mgId);
             this.albumBuffer.delete(mgId);
             if (entry) {
-              for (const m of entry.messages) {
-                await this.processChannelMessage(m, matched);
-              }
+              await this.processAlbum(entry.messages, matched);
             }
           }, 1500);
 
@@ -719,10 +931,10 @@ export class TelegramBotManager {
       }
 
       const title = tokens.slice(0, tgIdx).join(' ').trim();
-      const tgId = tokens[tgIdx].trim();
-      const baleId = tokens[tgIdx + 1] ? tokens[tgIdx + 1].trim() : '';
-      const rubikaId = tokens[tgIdx + 2] ? tokens[tgIdx + 2].trim() : '';
-      const eitaaId = tokens[tgIdx + 3] ? tokens[tgIdx + 3].trim() : '';
+      const tgId = (tokens[tgIdx] || '').trim();
+      const baleId = tokens[tgIdx + 1] ? (tokens[tgIdx + 1] || '').trim() : '';
+      const rubikaId = tokens[tgIdx + 2] ? (tokens[tgIdx + 2] || '').trim() : '';
+      const eitaaId = tokens[tgIdx + 3] ? (tokens[tgIdx + 3] || '').trim() : '';
 
       const newCh = config.addChannel({
         title,
@@ -754,9 +966,9 @@ export class TelegramBotManager {
     this.bot.command(['image', 'img', 'photo', 'art', 'draw'], async (ctx) => {
       const match = (ctx.match || '').trim();
       const replyOptions: any = {
-        reply_to_message_id: ctx.message.message_id
+        reply_to_message_id: ctx.message?.message_id
       };
-      if ((ctx.message as any).message_thread_id) {
+      if ((ctx.message as any)?.message_thread_id) {
         replyOptions.message_thread_id = (ctx.message as any).message_thread_id;
       }
 
@@ -833,7 +1045,7 @@ export class TelegramBotManager {
 
           // Pattern 1: relative minutes (e.g. "45m" or "45 دقیقه" or "45دقیقه")
           const minMatch = trimmed.match(/^(\d+)\s*(m|دقیقه|min)?$/i);
-          if (minMatch && (trimmed.includes('m') || trimmed.includes('دقیقه') || trimmed.includes('min'))) {
+          if (minMatch && minMatch[1] && (trimmed.includes('m') || trimmed.includes('دقیقه') || trimmed.includes('min'))) {
             const minutes = parseInt(minMatch[1], 10);
             if (minutes > 0) {
               scheduledTime = now + minutes * 60 * 1000;
@@ -842,7 +1054,7 @@ export class TelegramBotManager {
 
           // Pattern 2: HH:MM (e.g. "21:30" or "8:00")
           const timeMatch = trimmed.match(/^(\d{1,2})[:：](\d{1,2})$/);
-          if (timeMatch) {
+          if (timeMatch && timeMatch[1] && timeMatch[2]) {
             const hour = parseInt(timeMatch[1], 10);
             const minute = parseInt(timeMatch[2], 10);
             if (hour >= 0 && hour < 24 && minute >= 0 && minute < 60) {
@@ -919,8 +1131,59 @@ export class TelegramBotManager {
         }
       }
 
-      // Check channel addition wizard in private chat
+      // Check channel addition wizard or approval caption edit in private chat
       if (ctx.chat.type === 'private' && ctx.from && this.isAuthorizedAdmin(ctx.from.username)) {
+        const editSession = this.adminEditSessions.get(ctx.from.id);
+        if (editSession) {
+          if (text.startsWith('/cancel') || text === 'انصراف' || text === 'لغو') {
+            this.adminEditSessions.delete(ctx.from.id);
+            await ctx.reply('❌ ویرایش متن لغو شد.', {
+              reply_markup: new InlineKeyboard().text('🔙 بازگشت به پست', `cb:appr_back:${editSession.approvalId}`)
+            });
+            return;
+          }
+
+          const pending = this.pendingApprovals.get(editSession.approvalId) || botDb.getPendingApproval(editSession.approvalId);
+          if (!pending) {
+            this.adminEditSessions.delete(ctx.from.id);
+            await ctx.reply('⚠️ این پست منقضی شده یا یافت نشد.');
+            return;
+          }
+
+          if (editSession.platform === 'all') {
+            pending.caption = text;
+            if (pending.text) pending.text = text;
+            if (pending.perPlatformCaptions) {
+              pending.perPlatformCaptions.bale = text;
+              pending.perPlatformCaptions.rubika = text;
+              pending.perPlatformCaptions.eitaa = text;
+            }
+          } else {
+            if (!pending.perPlatformCaptions) {
+              const base = pending.caption || pending.text || '';
+              pending.perPlatformCaptions = { bale: base, rubika: base, eitaa: base };
+            }
+            pending.perPlatformCaptions[editSession.platform] = text;
+          }
+
+          this.pendingApprovals.set(editSession.approvalId, pending);
+          botDb.savePendingApproval(pending);
+          this.adminEditSessions.delete(ctx.from.id);
+
+          const platName = editSession.platform === 'all' ? 'همه پیام‌رسان‌ها' : (editSession.platform === 'bale' ? 'بله' : (editSession.platform === 'rubika' ? 'روبیکا' : 'ایتا'));
+          await ctx.reply(
+            `✅ <b>متن با موفقیت برای (${platName}) ثبت شد!</b>\n\n` +
+            `📝 <b>متن ویرایش‌شده:</b>\n` +
+            `<i>${text.slice(0, 350)}</i>\n\n` +
+            `جهت اقدام نهایی دکمه مورد نظر را انتخاب نمایید:`,
+            {
+              parse_mode: 'HTML',
+              reply_markup: this.getApprovalKeyboard(editSession.approvalId)
+            }
+          );
+          return;
+        }
+
         const wizard = this.pendingChannelWizard.get(ctx.from.id);
         if (wizard) {
           if (text.startsWith('/cancel') || text === 'انصراف' || text === 'لغو') {
@@ -1294,9 +1557,9 @@ export class TelegramBotManager {
         kb.text(`${icon} ${ch.title}`, `cb:up:${ch.id}:${uploadKey}`);
         if (i % 2 === 1) kb.row();
       }
-      if (config.settings.channels.length % 2 !== 0 && !isAli) kb.row();
+      if (config.settings.channels.length % 2 !== 0 && !isRestricted) kb.row();
 
-      if (!isAli) {
+      if (!isRestricted) {
         kb.text('🌐 تمام کانال‌ها', `cb:up:all:${uploadKey}`).row();
       }
       kb.text('❌ انصراف', `cb:up:cancel:${uploadKey}`);
@@ -1725,12 +1988,13 @@ export class TelegramBotManager {
       } catch {}
     });
 
+    // ================= Approval Mode Handlers =================
     this.bot.callbackQuery(/^cb:appr_ok:(.+)$/, async (ctx) => {
       if (!this.isAuthorizedAdmin(ctx.from?.username)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
-      const pending = this.pendingApprovals.get(approvalId);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
 
       if (!pending) {
         return ctx.answerCallbackQuery({
@@ -1741,37 +2005,57 @@ export class TelegramBotManager {
 
       await ctx.answerCallbackQuery({ text: '⏳ تایید شد. در حال ارسال به پیام‌رسان‌ها...' });
       this.pendingApprovals.delete(approvalId);
+      botDb.updatePendingApprovalStatus(approvalId, 'approved');
 
       try {
-        let fileData: ArrayBuffer | undefined;
-        let fileName = 'file';
-
-        if (pending.fileId) {
-          const dl = await this.downloadTelegramFile(pending.fileId);
-          fileData = dl.data;
-          fileName = dl.fileName;
+        const channel = pending.channel || config.settings.channels.find(c => c.id === pending.channelId);
+        if (!channel) {
+          return ctx.answerCallbackQuery({ text: 'کانال مقصد یافت نشد یا حذف شده است.', show_alert: true });
         }
 
-        const results = await dispatcher.broadcastForChannel({
-          channel: pending.channel,
-          mediaType: pending.mediaType,
-          fileData,
-          fileName,
-          rawText: pending.text,
-          caption: pending.caption,
-          source: pending.source,
-          postId: pending.postId
-        });
+        let bSuccess = false;
+        let rSuccess = false;
+        let eSuccess = false;
 
-        const bIcon = results.bale?.success ? '✅ بله' : (results.bale?.skipped ? '⚪ رد شد' : '❌ بله');
-        const rIcon = results.rubika?.success ? '✅ روبیکا' : (results.rubika?.skipped ? '⚪ رد شد' : '❌ روبیکا');
+        if (pending.isAlbum && pending.albumItems) {
+          const res = await dispatcher.broadcastAlbumForChannel({
+            channel,
+            items: pending.albumItems,
+            caption: pending.caption || '',
+            perPlatformCaptions: pending.perPlatformCaptions,
+            source: pending.source,
+            postId: pending.postId
+          });
+          bSuccess = Boolean(res.bale?.success);
+          rSuccess = Boolean(res.rubika?.success);
+          eSuccess = Boolean(res.eitaa?.success);
+        } else {
+          const res = await dispatcher.broadcastForChannel({
+            channel,
+            mediaType: pending.mediaType,
+            filePath: pending.filePath,
+            fileName: pending.fileName,
+            rawText: pending.text,
+            caption: pending.caption,
+            perPlatformCaptions: pending.perPlatformCaptions,
+            source: pending.source,
+            postId: pending.postId
+          });
+          bSuccess = Boolean(res.bale?.success);
+          rSuccess = Boolean(res.rubika?.success);
+          eSuccess = Boolean(res.eitaa?.success);
+        }
+
+        const bIcon = bSuccess ? '✅ بله' : '❌ بله';
+        const rIcon = rSuccess ? '✅ روبیکا' : '❌ روبیکا';
+        const eIcon = eSuccess ? '✅ ایتا' : '⚪ ایتا';
         const adminName = `@${ctx.from?.username || ctx.from?.first_name || 'Admin'}`;
 
         const confirmationMsg = (
           `✅ <b>پست با موفقیت تایید و به مقاصد ارسال شد!</b>\n\n` +
-          `📢 <b>کانال:</b> ${pending.channel.title}\n` +
+          `📢 <b>کانال:</b> ${channel.title}\n` +
           `👤 <b>تاییدکننده:</b> ${adminName}\n` +
-          `📊 <b>نتیجه:</b> ${bIcon} | ${rIcon}`
+          `📊 <b>نتیجه ارسال:</b> ${bIcon} | ${rIcon} | ${eIcon}`
         );
 
         try {
@@ -1790,8 +2074,13 @@ export class TelegramBotManager {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
-      const pending = this.pendingApprovals.get(approvalId);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
       this.pendingApprovals.delete(approvalId);
+      botDb.updatePendingApprovalStatus(approvalId, 'rejected');
+
+      if (pending?.filePath && existsSync(pending.filePath)) {
+        try { unlinkSync(pending.filePath); } catch {}
+      }
 
       await ctx.answerCallbackQuery({ text: '❌ ارسال این پست لغو گردید.' });
       const adminName = `@${ctx.from?.username || ctx.from?.first_name || 'Admin'}`;
@@ -1802,6 +2091,263 @@ export class TelegramBotManager {
           `❌ <b>ارسال پست ${title} توسط ${adminName} لغو شد.</b>\n` +
           `این پست به هیچ‌کدام از پیام‌رسان‌ها فوروارد نخواهد شد.`,
           { parse_mode: 'HTML' }
+        );
+      } catch {}
+    });
+
+    this.bot.callbackQuery(/^cb:appr_edit:(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const approvalId = String(ctx.match[1]);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
+      if (!pending) return ctx.answerCallbackQuery({ text: 'پست یافت نشد.' });
+
+      await ctx.answerCallbackQuery();
+      const editKb = new InlineKeyboard()
+        .text('📝 ویرایش کلی (همه پیام‌رسان‌ها)', `cb:appr_set_edit:${approvalId}:all`)
+        .row()
+        .text('🍃 فقط بله', `cb:appr_set_edit:${approvalId}:bale`)
+        .text('🟣 فقط روبیکا', `cb:appr_set_edit:${approvalId}:rubika`)
+        .text('🟠 فقط ایتا', `cb:appr_set_edit:${approvalId}:eitaa`)
+        .row()
+        .text('🔙 بازگشت', `cb:appr_back:${approvalId}`);
+
+      try {
+        await ctx.editMessageText(
+          `✏️ <b>انتخاب پلتفرم برای ویرایش متن:</b>\n\n` +
+          `می‌توانید متن را به طور سراسری یا به صورت تفکیک‌شده برای هر شبکه اجتماعی شخصی‌سازی کنید:`,
+          { parse_mode: 'HTML', reply_markup: editKb }
+        );
+      } catch {}
+    });
+
+    this.bot.callbackQuery(/^cb:appr_set_edit:(.+):(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const approvalId = String(ctx.match[1]);
+      const platform = String(ctx.match[2]) as 'all' | 'bale' | 'rubika' | 'eitaa';
+      if (ctx.from) {
+        this.adminEditSessions.set(ctx.from.id, { approvalId, platform });
+      }
+      await ctx.answerCallbackQuery({ text: 'آماده دریافت متن جدید...' });
+
+      const platName = platform === 'all' ? 'همه پیام‌رسان‌ها' : (platform === 'bale' ? 'بله' : (platform === 'rubika' ? 'روبیکا' : 'ایتا'));
+      await ctx.reply(
+        `✍️ <b>لطفاً متن یا کپشن جدید خود برای (${platName}) را تایپ و ارسال کنید:</b>\n\n` +
+        `<i>(برای انصراف /cancel بفرستید)</i>`,
+        { parse_mode: 'HTML' }
+      );
+    });
+
+    this.bot.callbackQuery(/^cb:appr_ai:(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const approvalId = String(ctx.match[1]);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
+      if (!pending) return ctx.answerCallbackQuery({ text: 'پست یافت نشد.' });
+
+      const baseText = pending.caption || pending.text || '';
+      if (!baseText.trim()) {
+        return ctx.answerCallbackQuery({ text: 'این پست فاقد متن یا کپشن برای بهینه‌سازی است!', show_alert: true });
+      }
+
+      await ctx.answerCallbackQuery({ text: '✨ در حال بهینه‌سازی با هوش مصنوعی...' });
+
+      try {
+        const prompt = (
+          `به عنوان یک کارشناس ارشد تولید محتوای شبکه‌های اجتماعی فارسی (بله، روبیکا، ایتا)، متن زیر را بازنویسی و بهینه‌سازی کن:\n` +
+          `- لحن جذاب، گیرا و حرفه‌ای\n` +
+          `- پاراگراف‌بندی تمیز با اموجی‌های مناسب\n` +
+          `- هشتگ‌های کاربردی مرتبط\n` +
+          `- حذف لینک‌های تبلیغاتی مزاحم و نامربوط\n\n` +
+          `متن اصلی:\n${baseText}\n\n` +
+          `فقط متن نهایی و اصلاح‌شده را بدون هیچ مقدمه یا توضیح اضافه تحویل بده:`
+        );
+
+        const enhanced = await geminiService.generateResponse(prompt);
+        if (!enhanced || enhanced.length < 5) {
+          throw new Error('پاسخ معتبری از هوش مصنوعی دریافت نشد');
+        }
+
+        pending.aiEnhancedText = enhanced.trim();
+        this.pendingApprovals.set(approvalId, pending);
+        botDb.savePendingApproval(pending);
+
+        const aiKb = new InlineKeyboard()
+          .text('✅ اعمال و جایگزینی این متن', `cb:appr_apply_ai:${approvalId}`)
+          .row()
+          .text('🔙 بازگشت بدون تغییر', `cb:appr_back:${approvalId}`);
+
+        await ctx.editMessageText(
+          `✨ <b>پیشنهاد بهینه‌سازی شده توسط هوش مصنوعی:</b>\n\n` +
+          `<i>${enhanced.slice(0, 600)}</i>\n\n` +
+          `👇 آیا مایلید این متن جایگزین متن قبلی شود؟`,
+          { parse_mode: 'HTML', reply_markup: aiKb }
+        );
+      } catch (err: any) {
+        console.error('[Telegram] AI optimization error:', err);
+        await ctx.reply(`⚠️ خطا در بهینه‌سازی متن با هوش مصنوعی:\n${err.message || String(err)}`);
+      }
+    });
+
+    this.bot.callbackQuery(/^cb:appr_apply_ai:(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const approvalId = String(ctx.match[1]);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
+      if (!pending || !pending.aiEnhancedText) return ctx.answerCallbackQuery({ text: 'متن هوش مصنوعی یافت نشد.' });
+
+      pending.caption = pending.aiEnhancedText;
+      if (pending.text) pending.text = pending.aiEnhancedText;
+      if (pending.perPlatformCaptions) {
+        pending.perPlatformCaptions.bale = pending.aiEnhancedText;
+        pending.perPlatformCaptions.rubika = pending.aiEnhancedText;
+        pending.perPlatformCaptions.eitaa = pending.aiEnhancedText;
+      }
+      this.pendingApprovals.set(approvalId, pending);
+      botDb.savePendingApproval(pending);
+
+      await ctx.answerCallbackQuery({ text: '✅ متن بهینه‌شده اعمال گردید!' });
+
+      const contentPreview = pending.caption.slice(0, 300);
+      try {
+        await ctx.editMessageText(
+          `✨ <b>متن با پیشنهاد هوش مصنوعی با موفقیت به‌روز شد!</b>\n\n` +
+          `📢 <b>کانال:</b> ${pending.channelTitle}\n` +
+          `📝 <b>پیش‌نمایش جدید:</b>\n<i>${contentPreview}</i>\n\n` +
+          `👇 جهت اقدام نهایی انتخاب کنید:`,
+          { parse_mode: 'HTML', reply_markup: this.getApprovalKeyboard(approvalId) }
+        );
+      } catch {}
+    });
+
+    this.bot.callbackQuery(/^cb:appr_links:(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const approvalId = String(ctx.match[1]);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
+      if (!pending) return ctx.answerCallbackQuery({ text: 'پست یافت نشد.' });
+
+      const channel = pending.channel || config.settings.channels.find(c => c.id === pending.channelId);
+      if (!channel) return ctx.answerCallbackQuery({ text: 'کانال یافت نشد.' });
+
+      const baseText = pending.caption || pending.text || '';
+      const transformed = this.transformLinksForPlatforms(baseText, channel);
+      pending.perPlatformCaptions = transformed;
+      this.pendingApprovals.set(approvalId, pending);
+      botDb.savePendingApproval(pending);
+
+      await ctx.answerCallbackQuery({
+        text: '🔗 لینک‌ها برای بله (ble.ir)، روبیکا (rubika.ir) و ایتا (eitaa.com) متناسب‌سازی شدند!',
+        show_alert: true
+      });
+
+      try {
+        await ctx.editMessageText(
+          `🔗 <b>لینک‌های پست با موفقیت تفکیک و متناسب‌سازی شدند!</b>\n\n` +
+          `📢 <b>کانال:</b> ${pending.channelTitle}\n` +
+          `▫️ بله: لینک‌های <code>ble.ir</code>\n` +
+          `▫️ روبیکا: لینک‌های <code>rubika.ir</code>\n` +
+          `▫️ ایتا: لینک‌های <code>eitaa.com</code>\n\n` +
+          `👇 جهت بررسی یا ارسال اقدام فرمایید:`,
+          { parse_mode: 'HTML', reply_markup: this.getApprovalKeyboard(approvalId) }
+        );
+      } catch {}
+    });
+
+    this.bot.callbackQuery(/^cb:appr_preview:(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const approvalId = String(ctx.match[1]);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
+      if (!pending) return ctx.answerCallbackQuery({ text: 'پست یافت نشد.' });
+
+      await ctx.answerCallbackQuery();
+      const bText = pending.perPlatformCaptions?.bale || pending.caption || pending.text || '(بدون متن)';
+      const rText = pending.perPlatformCaptions?.rubika || pending.caption || pending.text || '(بدون متن)';
+      const eText = pending.perPlatformCaptions?.eitaa || pending.caption || pending.text || '(بدون متن)';
+
+      const kb = new InlineKeyboard().text('🔙 بازگشت به پست', `cb:appr_back:${approvalId}`);
+
+      try {
+        await ctx.editMessageText(
+          `👁️ <b>پیش‌نمایش کپشن در پیام‌رسان‌های مختلف:</b>\n\n` +
+          `🍃 <b>بله:</b>\n<i>${bText.slice(0, 180)}</i>\n\n` +
+          `🟣 <b>روبیکا:</b>\n<i>${rText.slice(0, 180)}</i>\n\n` +
+          `🟠 <b>ایتا:</b>\n<i>${eText.slice(0, 180)}</i>`,
+          { parse_mode: 'HTML', reply_markup: kb }
+        );
+      } catch {}
+    });
+
+    this.bot.callbackQuery(/^cb:appr_send:(.+):(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const platform = String(ctx.match[1]) as 'bale' | 'rubika' | 'eitaa';
+      const approvalId = String(ctx.match[2]);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
+      if (!pending) return ctx.answerCallbackQuery({ text: 'پست یافت نشد.' });
+
+      const platFa = platform === 'bale' ? 'بله' : (platform === 'rubika' ? 'روبیکا' : 'ایتا');
+      await ctx.answerCallbackQuery({ text: `⏳ در حال ارسال فقط به ${platFa}...` });
+
+      try {
+        const channel = pending.channel || config.settings.channels.find(c => c.id === pending.channelId);
+        if (!channel) return ctx.answerCallbackQuery({ text: 'کانال یافت نشد.' });
+
+        const targetCaption = pending.perPlatformCaptions?.[platform] || pending.caption;
+        if (pending.isAlbum && pending.albumItems) {
+          await dispatcher.broadcastAlbumForChannel({
+            channel,
+            items: pending.albumItems,
+            caption: targetCaption || '',
+            perPlatformCaptions: pending.perPlatformCaptions,
+            source: pending.source,
+            postId: pending.postId
+          });
+        } else {
+          await dispatcher.broadcastForChannel({
+            channel,
+            mediaType: pending.mediaType,
+            filePath: pending.filePath,
+            fileName: pending.fileName,
+            rawText: pending.text,
+            caption: targetCaption,
+            perPlatformCaptions: pending.perPlatformCaptions,
+            source: pending.source,
+            postId: pending.postId
+          });
+        }
+        await ctx.reply(`✅ پست با موفقیت به صورت اختصاصی به <b>${platFa}</b> ارسال شد!`, { parse_mode: 'HTML' });
+      } catch (err: any) {
+        await ctx.reply(`❌ خطا در ارسال به ${platFa}: ${err.message || String(err)}`);
+      }
+    });
+
+    this.bot.callbackQuery(/^cb:appr_back:(.+)$/, async (ctx) => {
+      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+        return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
+      }
+      const approvalId = String(ctx.match[1]);
+      const pending = this.pendingApprovals.get(approvalId) || botDb.getPendingApproval(approvalId);
+      if (!pending) return ctx.answerCallbackQuery({ text: 'پست یافت نشد.' });
+
+      await ctx.answerCallbackQuery();
+      const contentPreview = (pending.caption || pending.text || '(بدون کپشن/متن)').slice(0, 300);
+      try {
+        await ctx.editMessageText(
+          `📋 <b>پست در انتظار تایید برای بازنشر:</b>\n\n` +
+          `📢 <b>کانال:</b> ${pending.channelTitle}\n` +
+          `📝 <b>پیش‌نمایش محتوا:</b>\n<i>${contentPreview}</i>\n\n` +
+          `👇 لطفاً از گزینه‌های زیر اقدام نمایید:`,
+          { parse_mode: 'HTML', reply_markup: this.getApprovalKeyboard(approvalId) }
         );
       } catch {}
     });
@@ -2191,7 +2737,7 @@ export class TelegramBotManager {
 
     kb.text('🔄 بروزرسانی لیست', 'cb:list_scheduled')
       .row()
-      .text('🔙 بازگشت به منوی اصلی', isAli ? 'cb:ali_yakashef_guide' : 'cb:main_menu');
+      .text('🔙 بازگشت به منوی اصلی', isRestricted ? 'cb:ali_yakashef_guide' : 'cb:main_menu');
 
     if (isEdit) {
       try {

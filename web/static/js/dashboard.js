@@ -54,6 +54,10 @@ function showToast(message, type = 'info') {
 async function refreshStatus() {
   try {
     const res = await fetch('/api/status');
+    if (res.status === 401) {
+      showAuthModal();
+      return;
+    }
     if (!res.ok) return;
     const data = await res.json();
 
@@ -766,17 +770,259 @@ async function sendDirectPublish(e) {
   }
 }
 
+// --- HTML Escape Helper ---
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+// --- Authentication & Session Management ---
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/auth-check');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.auth_enabled && !data.authenticated) {
+      showAuthModal();
+    } else {
+      hideAuthModal();
+      initSSE();
+      loadRetryQueue();
+    }
+  } catch (err) {
+    console.warn('Auth check failed:', err);
+  }
+}
+
+function showAuthModal() {
+  const modal = document.getElementById('auth-modal');
+  if (modal) {
+    modal.style.display = 'flex';
+    const input = document.getElementById('auth-password-input');
+    if (input) input.focus();
+  }
+}
+
+function hideAuthModal() {
+  const modal = document.getElementById('auth-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  const input = document.getElementById('auth-password-input');
+  const btn = document.getElementById('auth-submit-btn');
+  const password = input ? input.value : '';
+  if (!password) return;
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '⏳ در حال بررسی...';
+  }
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      showToast('ورود با موفقیت انجام شد!', 'success');
+      hideAuthModal();
+      if (input) input.value = '';
+      initSSE();
+      refreshStatus();
+      refreshLogs();
+      loadChartData();
+      loadRetryQueue();
+    } else {
+      showToast(data.error || 'رمز عبور نادرست است.', 'error');
+    }
+  } catch (err) {
+    showToast(`خطا: ${err.message}`, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '🔑 ورود امن به داشبورد';
+    }
+  }
+}
+
+async function handleLogout() {
+  try {
+    await fetch('/api/logout', { method: 'POST' });
+    showToast('از حساب کاربری خارج شدید.', 'info');
+    showAuthModal();
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    const indicator = document.getElementById('sse-indicator');
+    const sseText = document.getElementById('sse-text');
+    if (indicator) indicator.className = 'sse-badge';
+    if (sseText) sseText.textContent = 'غیرفعال';
+  } catch (err) {
+    showToast(`خطا: ${err.message}`, 'error');
+  }
+}
+
+// --- Real-time Server-Sent Events (SSE) ---
+let eventSource = null;
+function initSSE() {
+  if (eventSource) return;
+
+  const indicator = document.getElementById('sse-indicator');
+  const sseText = document.getElementById('sse-text');
+
+  try {
+    eventSource = new EventSource('/api/events');
+
+    eventSource.onopen = () => {
+      if (indicator) indicator.className = 'sse-badge connected';
+      if (sseText) sseText.textContent = 'بلادرنگ فعال';
+    };
+
+    eventSource.onerror = () => {
+      if (indicator) indicator.className = 'sse-badge';
+      if (sseText) sseText.textContent = 'قطع ارتباط (در انتظار)';
+    };
+
+    eventSource.onmessage = (e) => {
+      try {
+        const event = JSON.parse(e.data);
+        if (event.type === 'log') {
+          refreshLogs();
+        } else if (event.type === 'status' || event.type === 'post') {
+          refreshStatus();
+          loadChartData();
+        } else if (event.type === 'retry') {
+          loadRetryQueue();
+          refreshStatus();
+        }
+      } catch (parseErr) {
+        console.error('Error parsing SSE event:', parseErr);
+      }
+    };
+  } catch (err) {
+    console.warn('SSE initialization failed:', err);
+  }
+}
+
+// --- Smart Retry Queue UI ---
+async function loadRetryQueue() {
+  const listEl = document.getElementById('retry-queue-list');
+  const badgeEl = document.getElementById('retry-pending-badge');
+  if (!listEl) return;
+
+  try {
+    const res = await fetch('/api/retry-queue');
+    if (res.status === 401) {
+      showAuthModal();
+      return;
+    }
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const pendingCount = data.stats?.pending || 0;
+    if (badgeEl) {
+      badgeEl.textContent = `${pendingCount} در انتظار`;
+      badgeEl.className = pendingCount > 0 ? 'badge badge-warning' : 'badge badge-info';
+    }
+
+    const jobs = data.jobs || [];
+    if (jobs.length === 0) {
+      listEl.innerHTML = '<div style="text-align:center; padding:15px; color:var(--text-dim); font-size:12.5px;">در حال حاضر صف تلاش‌های ناموفق خالی است.</div>';
+      return;
+    }
+
+    let html = '';
+    for (const job of jobs.slice(0, 8)) {
+      const platIcon = job.platform === 'bale' ? '🍃' : (job.platform === 'rubika' ? '🟣' : '🌾');
+      const statusFa = job.status === 'completed' ? '✅ موفق' : (job.status === 'failed' ? '❌ ناموفق' : '⏳ در صف تلاش');
+      const statusClass = job.status === 'completed' ? 'success' : (job.status === 'failed' ? 'error' : 'warning');
+
+      html += `
+        <div class="retry-item">
+          <div class="retry-item-info">
+            <span style="font-size:18px;">${platIcon}</span>
+            <div class="retry-meta">
+              <b>کانال: ${escapeHtml(job.channel_id)} | تلاش ${job.attempts}/${job.max_attempts}</b>
+              <span style="font-size:11.5px; color:var(--text-dim);">${escapeHtml(job.last_error || 'خطای اتصال')}</span>
+            </div>
+          </div>
+          <div class="retry-actions">
+            <span class="platform-chip ${statusClass}">${statusFa}</span>
+            ${job.status === 'pending' || job.status === 'failed' ? `
+              <button type="button" class="btn btn-secondary btn-sm" onclick="triggerRetryJob(${job.id}, this)">تلاش مجدد</button>
+              <button type="button" class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="cancelRetryJob(${job.id}, this)">لغو</button>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }
+    listEl.innerHTML = html;
+  } catch (err) {
+    console.error('Error loading retry queue:', err);
+  }
+}
+
+async function triggerRetryJob(id, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`/api/retry-queue/${id}/retry`, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      showToast('تلاش مجدد با موفقیت انجام شد.', 'success');
+      loadRetryQueue();
+      refreshStatus();
+    } else {
+      showToast('ارسال مجدد ناموفق بود یا هنوز برقرار نشده است.', 'error');
+    }
+  } catch (err) {
+    showToast(`خطا: ${err.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function cancelRetryJob(id, btn) {
+  if (!confirm('آیا از لغو این ارسال اطمینان دارید؟')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`/api/retry-queue/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      showToast('پست از صف تلاش حذف شد.', 'info');
+      loadRetryQueue();
+    }
+  } catch (err) {
+    showToast(`خطا: ${err.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // --- Initial Setup on DOM Ready ---
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
+  checkAuth();
   refreshStatus();
   refreshLogs();
   loadChartData();
+  loadRetryQueue();
 
-  // Polling intervals
-  setInterval(refreshStatus, 4000);
-  setInterval(refreshLogs, 5000);
-  setInterval(loadChartData, 30000);
+  // Gentle fallback intervals (SSE handles instant real-time events)
+  setInterval(refreshStatus, 15000);
+  setInterval(refreshLogs, 15000);
+  setInterval(loadChartData, 45000);
+  setInterval(loadRetryQueue, 20000);
 
   const directPublishForm = document.getElementById('direct-publish-form');
   if (directPublishForm) {

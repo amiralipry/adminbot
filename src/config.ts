@@ -76,6 +76,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enable_web_dashboard: true,
   web_host: '127.0.0.1',
   web_port: 5000,
+  dashboard_auth_enabled: true,
+  dashboard_password: process.env.DASHBOARD_PASSWORD || 'admin',
 
   daily_report_enabled: true,
   daily_report_time: '19:00',

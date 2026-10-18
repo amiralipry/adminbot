@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  adminbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sikaap-adminbot
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - TZ=Asia/Tehran
+      - NODE_ENV=production
+    volumes:
+      # Persistent SQLite database and temp streaming media files
+      - ./data:/app/data
+      # Configuration and environment files
+      - ./config.json:/app/config.json
+      - ./.env:/app/.env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

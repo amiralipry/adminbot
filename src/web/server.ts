@@ -8,10 +8,40 @@ import { rubikaService } from '../services/rubika';
 import { eitaaService } from '../services/eitaa';
 import { statsService } from '../services/stats';
 import { dailyReportScheduler } from '../services/scheduler';
+import { botDb } from '../services/db';
+import { retryQueue } from '../services/retryQueue';
+import { eventBus } from '../services/eventBus';
 
 const BASE_DIR = process.cwd();
 const STATIC_DIR = join(BASE_DIR, 'web', 'static');
 const TEMPLATES_DIR = join(BASE_DIR, 'web', 'templates');
+
+// In-memory active session tokens for secure dashboard access
+const activeSessions = new Set<string>();
+
+function generateSessionToken(): string {
+  return `sess_${Date.now()}_${Math.random().toString(36).substring(2)}${Math.random().toString(36).substring(2)}`;
+}
+
+function isAuthenticated(req: Request): boolean {
+  if (!config.settings.dashboard_auth_enabled) return true;
+
+  // 1. Check Cookie
+  const cookie = req.headers.get('cookie') || '';
+  const match = cookie.match(/admin_session=([^;]+)/);
+  if (match && match[1] && activeSessions.has(match[1])) {
+    return true;
+  }
+
+  // 2. Check Authorization Header / X-Admin-Token
+  const auth = req.headers.get('authorization') || req.headers.get('x-admin-token') || '';
+  const token = auth.replace(/^Bearer\s+/i, '').trim();
+  if (token && (activeSessions.has(token) || token === config.settings.dashboard_password)) {
+    return true;
+  }
+
+  return false;
+}
 
 export function startWebServer(): void {
   const host = config.settings.web_host || '127.0.0.1';
@@ -25,7 +55,7 @@ export function startWebServer(): void {
       const url = new URL(req.url);
       const path = url.pathname;
 
-      // 1. Static Files
+      // 1. Static Files (Publicly accessible)
       if (path.startsWith('/static/')) {
         const rel = path.replace('/static/', '');
         const filePath = join(STATIC_DIR, rel);
@@ -36,18 +66,76 @@ export function startWebServer(): void {
         return new Response('Not Found', { status: 404 });
       }
 
-      // 2. GET / (Dashboard)
+      // 2. Authentication API (Public)
+      if (path === '/api/login' && req.method === 'POST') {
+        try {
+          let password = '';
+          const contentType = req.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const body = (await req.json()) as any;
+            password = body?.password || '';
+          } else {
+            const formData = await req.formData();
+            password = (formData.get('password') as string) || '';
+          }
+
+          const targetPassword = config.settings.dashboard_password || process.env.DASHBOARD_PASSWORD || 'admin';
+          if (password === targetPassword) {
+            const token = generateSessionToken();
+            activeSessions.add(token);
+
+            return new Response(JSON.stringify({ success: true, message: 'ورود با موفقیت انجام شد.', token }), {
+              headers: {
+                'Content-Type': 'application/json',
+                'Set-Cookie': `admin_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`
+              }
+            });
+          }
+
+          return Response.json({ success: false, error: 'رمز عبور وارد شده نادرست است.' }, { status: 401 });
+        } catch (err: any) {
+          return Response.json({ success: false, error: err.message }, { status: 400 });
+        }
+      }
+
+      if (path === '/api/logout' && req.method === 'POST') {
+        const cookie = req.headers.get('cookie') || '';
+        const match = cookie.match(/admin_session=([^;]+)/);
+        if (match && match[1]) {
+          activeSessions.delete(match[1]);
+        }
+        return new Response(JSON.stringify({ success: true, message: 'با موفقیت خارج شدید.' }), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Set-Cookie': 'admin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'
+          }
+        });
+      }
+
+      if (path === '/api/auth-check' && req.method === 'GET') {
+        return Response.json({
+          authenticated: isAuthenticated(req),
+          auth_enabled: Boolean(config.settings.dashboard_auth_enabled)
+        });
+      }
+
+      // 3. GET / (Dashboard HTML)
       if (path === '/' && req.method === 'GET') {
         const htmlPath = join(TEMPLATES_DIR, 'dashboard.html');
         if (existsSync(htmlPath)) {
           let html = readFileSync(htmlPath, 'utf-8');
           const isPaused = config.settings.is_paused;
+          const isAuthed = isAuthenticated(req);
+          const authRequired = Boolean(config.settings.dashboard_auth_enabled);
+
           html = html
             .replace(/\{\{\s*PAUSE_BTN_TEXT\s*\}\}/g, isPaused ? '▶️ ادامه کار ربات' : '⏸️ توقف کامل ربات')
             .replace(/\{\{\s*SYS_STATUS_SUB\s*\}\}/g, isPaused ? 'متوقف شده' : 'در حال بازنشر')
             .replace(/\{\{\s*SYS_STATUS_BADGE_CLASS\s*\}\}/g, isPaused ? 'badge-danger' : 'badge-success')
             .replace(/\{\{\s*SYS_STATUS_BADGE_TEXT\s*\}\}/g, isPaused ? 'متوقف' : 'فعال')
-            .replace(/\{\{\s*WEB_PORT\s*\}\}/g, String(port));
+            .replace(/\{\{\s*WEB_PORT\s*\}\}/g, String(port))
+            .replace(/\{\{\s*AUTH_REQUIRED\s*\}\}/g, String(authRequired))
+            .replace(/\{\{\s*IS_AUTHENTICATED\s*\}\}/g, String(isAuthed));
 
           return new Response(html, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' }
@@ -56,8 +144,61 @@ export function startWebServer(): void {
         return new Response('Template not found', { status: 500 });
       }
 
-      // 3. API Status
+      // 4. Protect all remaining API routes
+      if (path.startsWith('/api/') && !isAuthenticated(req)) {
+        return Response.json({ success: false, error: 'احراز هویت الزامی است. لطفاً وارد شوید.' }, { status: 401 });
+      }
+
+      // 5. Server-Sent Events (SSE) Real-time Stream
+      if (path === '/api/events' && req.method === 'GET') {
+        let intervalId: any;
+        let listener: (event: any) => void;
+
+        const stream = new ReadableStream({
+          start(controller) {
+            // Initial connect notification
+            const initPayload = JSON.stringify({ type: 'connected', timestamp: new Date().toISOString() });
+            controller.enqueue(new TextEncoder().encode(`event: connected\ndata: ${initPayload}\n\n`));
+
+            listener = (botEvent: any) => {
+              try {
+                const payload = `event: message\ndata: ${JSON.stringify(botEvent)}\n\n`;
+                controller.enqueue(new TextEncoder().encode(payload));
+              } catch (err) {
+                console.error('[SSE] Broadcast error:', err);
+              }
+            };
+
+            eventBus.on('event', listener);
+
+            // Heartbeat every 15s to keep connection alive
+            intervalId = setInterval(() => {
+              try {
+                controller.enqueue(new TextEncoder().encode(': ping\n\n'));
+              } catch {
+                clearInterval(intervalId);
+              }
+            }, 15000);
+          },
+          cancel() {
+            if (intervalId) clearInterval(intervalId);
+            if (listener) eventBus.off('event', listener);
+          }
+        });
+
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+          }
+        });
+      }
+
+      // 6. API Status
       if (path === '/api/status' && req.method === 'GET') {
+        const retryStats = botDb.getRetryQueueStats();
         return Response.json({
           is_paused: config.settings.is_paused,
           approval_mode_enabled: config.settings.approval_mode_enabled,
@@ -65,6 +206,7 @@ export function startWebServer(): void {
           blacklist_keywords: config.settings.blacklist_keywords || [],
           auto_retry_enabled: config.settings.auto_retry_enabled,
           max_retry_attempts: config.settings.max_retry_attempts,
+          retry_stats: retryStats,
           pending_approvals_count: telegramBot.pendingApprovals ? telegramBot.pendingApprovals.size : 0,
           channels: config.settings.channels,
           telegram: {
@@ -99,13 +241,34 @@ export function startWebServer(): void {
         });
       }
 
-      // 4. API Toggle Pause
+      // 7. API Smart Retry Queue
+      if (path === '/api/retry-queue' && req.method === 'GET') {
+        const stats = botDb.getRetryQueueStats();
+        const jobs = botDb.getAllRetryJobs(50);
+        return Response.json({ stats, jobs });
+      }
+
+      const retryManualMatch = path.match(/^\/api\/retry-queue\/(\d+)\/retry$/);
+      if (retryManualMatch && req.method === 'POST') {
+        const jobId = parseInt(retryManualMatch[1] || '0', 10);
+        const ok = await retryQueue.retryManually(jobId);
+        return Response.json({ success: ok });
+      }
+
+      const retryCancelMatch = path.match(/^\/api\/retry-queue\/(\d+)$/);
+      if (retryCancelMatch && req.method === 'DELETE') {
+        const jobId = parseInt(retryCancelMatch[1] || '0', 10);
+        botDb.failRetryJob(jobId, 'لغو شده توسط ادمین در پنل وب');
+        return Response.json({ success: true });
+      }
+
+      // 8. API Toggle Pause
       if (path === '/api/toggle-pause' && req.method === 'POST') {
         const isPaused = config.toggleGlobalPause();
         return Response.json({ success: true, is_paused: isPaused });
       }
 
-      // 4.1 API Toggle Feature (Approval Mode / Ad Filter)
+      // 8.1 API Toggle Feature (Approval Mode / Ad Filter)
       if (path === '/api/toggle-feature' && req.method === 'POST') {
         try {
           let feature = '';
@@ -140,7 +303,7 @@ export function startWebServer(): void {
         }
       }
 
-      // 5. API Toggle Channel
+      // 9. API Toggle Channel
       const chMatch = path.match(/^\/api\/channels\/([^/]+)\/toggle$/);
       if (chMatch && req.method === 'POST') {
         const chId = String(chMatch[1]);
@@ -151,7 +314,7 @@ export function startWebServer(): void {
         return Response.json({ success: true, channel_id: chId, is_active: res });
       }
 
-      // 5.1 API Add Channel
+      // 9.1 API Add Channel
       if ((path === '/api/channels/add' || path === '/api/channels') && req.method === 'POST') {
         try {
           let data: any = {};
@@ -193,7 +356,7 @@ export function startWebServer(): void {
         }
       }
 
-      // 5.2 API Delete Channel
+      // 9.2 API Delete Channel
       const delMatch = path.match(/^\/api\/channels\/([^/]+)\/delete$/);
       if ((delMatch && req.method === 'POST') || (path.startsWith('/api/channels/') && req.method === 'DELETE')) {
         const chId = delMatch ? String(delMatch[1]) : path.replace('/api/channels/', '');
@@ -205,7 +368,7 @@ export function startWebServer(): void {
         }
       }
 
-      // 6. API Test Connection
+      // 10. API Test Connection
       const connMatch = path.match(/^\/api\/test-connection\/([^/]+)$/);
       if (connMatch && req.method === 'POST') {
         const plat = connMatch[1];
@@ -217,7 +380,7 @@ export function startWebServer(): void {
         return Response.json({ success: false, error: 'پلتفرم نامعتبر است' }, { status: 400 });
       }
 
-      // 7. API Test Broadcast
+      // 11. API Test Broadcast
       if (path === '/api/test-broadcast' && req.method === 'POST') {
         try {
           const formData = await req.formData();
@@ -264,7 +427,7 @@ export function startWebServer(): void {
         }
       }
 
-      // 7.1 API Direct Publish to Channels from Web Panel
+      // 12. API Direct Publish to Channels from Web Panel
       if (path === '/api/direct-publish' && req.method === 'POST') {
         try {
           const formData = await req.formData();
@@ -329,18 +492,18 @@ export function startWebServer(): void {
         }
       }
 
-      // 8. API Logs
+      // 13. API Logs
       if (path === '/api/logs' && req.method === 'GET') {
         return Response.json({ history: dispatcher.getRecentHistory(50) });
       }
 
-      // 8.1 API Weekly Chart Data
+      // 14. API Weekly Chart Data
       if (path === '/api/chart-data' && req.method === 'GET') {
         const analytics = statsService.getWeeklyAnalytics();
         return Response.json(analytics);
       }
 
-      // 9. API Restart Bot
+      // 15. API Restart Bot
       if (path === '/api/restart-bot' && req.method === 'POST') {
         (async () => {
           await telegramBot.stop();
@@ -350,20 +513,20 @@ export function startWebServer(): void {
         return Response.json({ success: true, message: 'ربات مجدداً راه‌اندازی شد.' });
       }
 
-      // 10. API Send Daily Report Now
+      // 16. API Send Daily Report Now
       if (path === '/api/send-report' && req.method === 'POST') {
         const res = await dailyReportScheduler.sendDailyReport();
         return Response.json(res);
       }
 
-      // 11. API Daily Report Preview
+      // 17. API Daily Report Preview
       if (path === '/api/report-preview' && req.method === 'GET') {
         const html = await statsService.generateReportHtml();
         const stats = statsService.getDayStats();
         return Response.json({ html, stats });
       }
 
-      // 12. API Update Report Settings
+      // 18. API Update Report Settings
       if (path === '/api/report-settings' && req.method === 'POST') {
         try {
           const body = (await req.json()) as any;

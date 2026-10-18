@@ -55,6 +55,8 @@ export interface AppSettings {
   auto_retry_enabled: boolean; // تلاش مجدد هوشمند تا ۳ بار
   max_retry_attempts: number; // حداکثر دفعات تلاش مجدد (پیش‌فرض ۳)
   restricted_admin_username?: string;
+  dashboard_auth_enabled?: boolean;
+  dashboard_password?: string;
 }
 
 export interface PlatformResult {
@@ -67,17 +69,55 @@ export interface PlatformResult {
   attempts?: number;
 }
 
+export interface MediaGroupItem {
+  messageId: number;
+  mediaType: string;
+  fileId: string;
+  fileName?: string;
+  filePath?: string;
+  caption?: string;
+}
+
 export interface PendingApprovalPost {
   id: string;
   channelId: string;
   channelTitle: string;
+  channel?: ChannelProfile;
   mediaType: string;
   text?: string;
   caption?: string;
+  perPlatformCaptions?: {
+    bale?: string;
+    rubika?: string;
+    eitaa?: string;
+  };
   fileId?: string;
+  filePath?: string;
   fileName?: string;
   source: string;
+  postId: string;
   createdAt: number;
+  isAlbum?: boolean;
+  albumItems?: MediaGroupItem[];
+  aiEnhancedText?: string;
+  date?: number;
+}
+
+export interface RetryJob {
+  id: number;
+  channel_id: string;
+  platform: 'bale' | 'rubika' | 'eitaa';
+  media_type: string;
+  raw_text?: string;
+  caption?: string;
+  file_path?: string;
+  file_name?: string;
+  attempts: number;
+  max_attempts: number;
+  next_retry_at: string;
+  last_error: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  created_at: string;
 }
 
 export interface ScheduledPost {
@@ -128,8 +168,10 @@ export interface ChannelDayStats {
 
 export interface ChannelStreak {
   channel_id: string;
-  last_active_date: string; // YYYY-MM-DD
-  consecutive_inactive_days: number;
+  last_active_date?: string; // YYYY-MM-DD
+  consecutive_inactive_days?: number;
+  last_post_date?: string;
+  current_empty_streak?: number;
 }
 
 export interface DayStatsRecord {

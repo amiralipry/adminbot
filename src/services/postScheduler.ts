@@ -4,6 +4,7 @@ import type { ScheduledPost } from '../types';
 import { dispatcher } from './dispatcher';
 import { statsService } from './stats';
 import { config } from '../config';
+import { botDb } from './db';
 
 const BASE_DIR = process.cwd();
 const DATA_DIR = join(BASE_DIR, 'data');
@@ -36,25 +37,22 @@ export class PostScheduleManager {
       }
     }
   }
-
   private load(): void {
-    if (existsSync(SCHEDULE_FILE)) {
-      try {
-        const raw = readFileSync(SCHEDULE_FILE, 'utf-8');
-        this.posts = JSON.parse(raw);
-      } catch (err) {
-        console.error('[PostScheduler] Error reading scheduled_posts.json:', err);
-        this.posts = [];
-      }
+    try {
+      this.posts = botDb.getScheduledPosts();
+    } catch (err) {
+      console.error('[PostScheduler] Error reading scheduled posts from SQLite:', err);
+      this.posts = [];
     }
   }
 
   private save(): void {
     try {
-      this.ensureDataDir();
-      writeFileSync(SCHEDULE_FILE, JSON.stringify(this.posts, null, 2), 'utf-8');
+      for (const p of this.posts) {
+        botDb.saveScheduledPost(p);
+      }
     } catch (err) {
-      console.error('[PostScheduler] Error saving scheduled_posts.json:', err);
+      console.error('[PostScheduler] Error saving scheduled posts to SQLite:', err);
     }
   }
 

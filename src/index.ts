@@ -3,10 +3,11 @@ import { telegramBot } from './bot/telegram';
 import { startWebServer } from './web/server';
 import { dailyReportScheduler } from './services/scheduler';
 import { postScheduler } from './services/postScheduler';
+import { retryQueue } from './services/retryQueue';
 
 console.log('\n======================================================================');
-console.log('🚀 ربات بازنشر محتوای چندکاناله (تلگرام ➔ بله و روبیکا)');
-console.log('⚙️ محیط اجرا: Bun + Node.js (TypeScript)');
+console.log('🚀 ربات بازنشر محتوای چندکاناله (تلگرام ➔ بله، روبیکا و ایتا)');
+console.log('⚙️ محیط اجرا: Bun + TypeScript (SQLite + SSE Real-time + Retry Queue)');
 console.log('======================================================================\n');
 
 // 1. Start Web Management Panel on port 5000
@@ -30,9 +31,13 @@ dailyReportScheduler.start();
 // 4. Start Post Scheduler (Checks every 15s for timed posts)
 postScheduler.start();
 
+// 5. Start Smart Retry Queue (Exponential backoff for transient failures)
+retryQueue.start();
+
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n👋 Shutting down services...');
+  retryQueue.stop();
   dailyReportScheduler.stop();
   postScheduler.stop();
   await telegramBot.stop();
@@ -41,6 +46,7 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   console.log('\n👋 Terminating services...');
+  retryQueue.stop();
   dailyReportScheduler.stop();
   postScheduler.stop();
   await telegramBot.stop();

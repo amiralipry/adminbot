@@ -1,6 +1,8 @@
 import { join } from 'path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { config } from '../config';
+import { botDb } from './db';
+import { eventBus } from './eventBus';
 import type { ChannelProfile, PlatformResult, DayStatsRecord, ChannelDayStats, ChannelStreak } from '../types';
 
 const BASE_DIR = process.cwd();
@@ -101,34 +103,36 @@ export class StatsManager {
       return { dateKey: fallbackKey, jalaliDate: fallbackKey, timeStr: '19:00' };
     }
   }
-
   private load(): void {
-    if (existsSync(STATS_FILE)) {
-      try {
-        const raw = readFileSync(STATS_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (parsed.days) {
-          this.data = parsed;
-        } else {
-          // Backward compatibility if root was Record<string, DayStatsRecord>
-          this.data = {
-            streaks: {},
-            days: parsed
-          };
-        }
-      } catch (err) {
-        console.error('[Stats] Error reading daily_stats.json:', err);
-        this.data = { streaks: {}, days: {} };
-      }
+    try {
+      this.data.streaks = botDb.getStreaks();
+      this.data.days = botDb.getAllDaysStats();
+    } catch (err) {
+      console.error('[Stats] Error loading stats from SQLite:', err);
+      this.data = { streaks: {}, days: {} };
     }
   }
 
   private save(): void {
     try {
-      this.ensureDataDir();
-      writeFileSync(STATS_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
+      for (const [chId, s] of Object.entries(this.data.streaks)) {
+        botDb.setStreak(
+          chId,
+          (s as any).consecutive_inactive_days ?? s.current_empty_streak ?? 0,
+          (s as any).last_active_date ?? s.last_post_date
+        );
+      }
+      const { dateKey, jalaliDate } = this.getTehranInfo();
+      const todayRecord = this.data.days[dateKey];
+      if (todayRecord) {
+        botDb.saveDayStats(dateKey, jalaliDate, todayRecord);
+      }
+      eventBus.broadcast('status', {
+        dateKey,
+        total_posts: todayRecord?.total_posts || 0
+      });
     } catch (err) {
-      console.error('[Stats] Error saving daily_stats.json:', err);
+      console.error('[Stats] Error saving stats to SQLite:', err);
     }
   }
 

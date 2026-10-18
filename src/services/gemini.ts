@@ -11,7 +11,7 @@ export class GeminiService {
   ];
 
   // Store conversation history per chat (last 10 turns per chatId)
-  private chatHistories = new Map<string, Array<{ role: 'user' | 'model'; parts: [{ text: string }] }>>();
+  private chatHistories = new Map<string, Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>>();
 
   private constructor() {}
 
@@ -20,6 +20,10 @@ export class GeminiService {
       GeminiService.instance = new GeminiService();
     }
     return GeminiService.instance;
+  }
+
+  public async generateResponse(prompt: string): Promise<string> {
+    return this.generateReply(prompt);
   }
 
   public isEnabled(): boolean {
@@ -145,7 +149,7 @@ export class GeminiService {
         { role: 'system', content: basePrompt },
         ...history.map(h => ({
           role: h.role === 'user' ? 'user' : 'assistant',
-          content: h.parts[0].text
+          content: h.parts[0]?.text || ''
         })),
         { role: 'user', content: promptText }
       ];
@@ -243,7 +247,7 @@ export class GeminiService {
         { role: 'system', content: basePrompt },
         ...history.map(h => ({
           role: h.role === 'user' ? 'user' : 'assistant',
-          content: h.parts[0].text
+          content: h.parts[0]?.text || ''
         })),
         { role: 'user', content: promptText }
       ];

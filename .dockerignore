@@ -1,0 +1,10 @@
+.git
+.gitignore
+node_modules
+data/temp/*
+data/logs/*
+data/*.db*
+data/*.json
+*.log
+.DS_Store
+Thumbs.db

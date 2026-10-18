@@ -19,6 +19,7 @@ data/logs/
 data/media/*
 data/daily_stats.json
 data/scheduled_posts.json
+data/*.db*
 *.log
 
 # Python cache (legacy cleanup)

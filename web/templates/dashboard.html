@@ -21,6 +21,10 @@
         </div>
       </div>
       <div class="header-actions">
+        <div class="sse-badge" id="sse-indicator" title="وضعیت ارتباط بلادرنگ">
+          <span class="pulse-dot"></span>
+          <span id="sse-text">درحال اتصال...</span>
+        </div>
         <button type="button" class="btn-theme-toggle" id="theme-toggle-btn" onclick="toggleTheme()">
           ☀️ تم روشن
         </button>
@@ -29,6 +33,9 @@
         </button>
         <button type="button" class="btn btn-primary" onclick="toggleGlobalPause(this)" id="global-pause-btn">
           {{ PAUSE_BTN_TEXT }}
+        </button>
+        <button type="button" class="btn btn-secondary" onclick="handleLogout()" id="logout-btn" title="خروج از حساب">
+          🚪 خروج
         </button>
       </div>
     </header>
@@ -471,6 +478,25 @@
           <div id="report-preview-box" style="display: none; margin-top: 14px; background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; font-size: 12.5px; white-space: pre-wrap; line-height: 1.6; max-height: 250px; overflow-y: auto;"></div>
         </div>
 
+        <!-- Smart Retry Queue Card -->
+        <div class="card" id="retry-queue-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">🔄</span>
+              <span>صف تلاش مجدد هوشمند (Smart Retry Queue)</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="badge badge-info" id="retry-pending-badge">۰ در انتظار</span>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="loadRetryQueue()">🔄</button>
+            </div>
+          </div>
+          <div class="retry-list" id="retry-queue-list">
+            <div style="text-align:center; padding:15px; color:var(--text-dim); font-size:12.5px;">
+              در حال حاضر صف تلاش‌های ناموفق خالی است.
+            </div>
+          </div>
+        </div>
+
         <!-- Live Activity Log -->
         <div class="card">
           <div class="card-header">
@@ -493,6 +519,24 @@
 
   <!-- Toast Notification Container -->
   <div id="toast-container"></div>
+
+  <!-- Authentication Modal Overlay -->
+  <div id="auth-modal" class="auth-overlay" style="display: none;">
+    <div class="auth-card">
+      <div class="auth-icon">🔐</div>
+      <h2>ورود به پنل مدیریت ربات</h2>
+      <p>لطفاً جهت دسترسی به تنظیمات و وضعیت پیام‌رسان‌ها، رمز عبور مدیریت را وارد نمایید.</p>
+      <form id="auth-form" onsubmit="handleLogin(event)">
+        <div class="form-group" style="text-align: right; margin-bottom: 20px;">
+          <label class="form-label">رمز عبور داشبورد:</label>
+          <input type="password" id="auth-password-input" class="form-input" placeholder="••••••••" required autofocus style="direction: ltr; text-align: center; letter-spacing: 2px;">
+        </div>
+        <button type="submit" class="btn btn-primary" id="auth-submit-btn" style="width: 100%; justify-content: center; padding: 12px;">
+          🔑 ورود امن به داشبورد
+        </button>
+      </form>
+    </div>
+  </div>
 
   <script src="/static/js/dashboard.js"></script>
 </body>
