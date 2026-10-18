@@ -1,0 +1,35 @@
+# Dependencies (bun install)
+node_modules
+bun.lockb
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+config.json
+
+# Build output
+out
+dist
+*.tgz
+
+# Data & Temp files
+data/temp/
+data/logs/
+data/media/*
+data/daily_stats.json
+data/scheduled_posts.json
+*.log
+
+# Python cache (legacy cleanup)
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env.local
+
+# IDE & Editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

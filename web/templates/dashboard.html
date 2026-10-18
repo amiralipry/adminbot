@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>پنل مدیریت ربات بازنشر چندکاناله | سیکاپ هلث، سیکاپ فود، فرایاد، یاکاشف</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220%22><text y=%2222%22 font-size=%2222%22>🤖</text></svg>">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="brand">
+        <div class="brand-icon">🔄</div>
+        <div class="brand-title">
+          <h1>ربات بازنشر هوشمند چندکاناله</h1>
+          <p>سیکاپ هلث | سیکاپ فود | فرایاد | یاکاشف الکرب (تلگرام ➔ بله، روبیکا و ایتا)</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="btn-theme-toggle" id="theme-toggle-btn" onclick="toggleTheme()">
+          ☀️ تم روشن
+        </button>
+        <button type="button" class="btn btn-secondary" onclick="restartBot(this)">
+          🔄 راه‌اندازی مجدد بات
+        </button>
+        <button type="button" class="btn btn-primary" onclick="toggleGlobalPause(this)" id="global-pause-btn">
+          {{ PAUSE_BTN_TEXT }}
+        </button>
+      </div>
+    </header>
+
+    <!-- Admin Notification Banner -->
+    <div class="notice-banner">
+      <div class="notice-banner-text">
+        <span style="font-size: 22px;">🛡️</span>
+        <div>
+          <b>کنترل اختصاصی از طریق تلگرام:</b>
+          ربات ادمین منحصراً برای ادمین‌های مجاز تعریف‌شده فعال است و امکان ارسال دستورات و دکمه‌های تایید فراهم است.
+        </div>
+      </div>
+      <span class="badge badge-success">دسترسی امن ادمین</span>
+    </div>
+
+    <!-- Top Status Bar (5 Platforms) -->
+    <div class="status-bar">
+      <!-- Telegram -->
+      <div class="status-card">
+        <div class="status-card-info">
+          <div class="status-card-icon tg">✈️</div>
+          <div>
+            <div class="status-title">ربات تلگرام</div>
+            <div class="status-sub" id="tg-status-sub">ربات فعال</div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <span class="badge badge-success" id="tg-status-badge"><span class="badge-dot"></span> متصل</span>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="testConnection('telegram', this)">تست</button>
+        </div>
+      </div>
+
+      <!-- Bale -->
+      <div class="status-card">
+        <div class="status-card-info">
+          <div class="status-card-icon bale">🍃</div>
+          <div>
+            <div class="status-title">بازوی بله</div>
+            <div class="status-sub" id="bale-status-sub">بازوی متصل</div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <span class="badge badge-success" id="bale-status-badge"><span class="badge-dot"></span> آماده</span>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="testConnection('bale', this)">تست</button>
+        </div>
+      </div>
+
+      <!-- Rubika -->
+      <div class="status-card">
+        <div class="status-card-info">
+          <div class="status-card-icon rubika">🟣</div>
+          <div>
+            <div class="status-title">ربات روبیکا</div>
+            <div class="status-sub" id="rubika-status-sub">کانال روبیکا</div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <span class="badge badge-success" id="rubika-status-badge"><span class="badge-dot"></span> آماده</span>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="testConnection('rubika', this)">تست</button>
+        </div>
+      </div>
+
+      <!-- Eitaa -->
+      <div class="status-card">
+        <div class="status-card-info">
+          <div class="status-card-icon eitaa">🌾</div>
+          <div>
+            <div class="status-title">ارسال ایتا</div>
+            <div class="status-sub" id="eitaa-status-sub">سرویس ایتا</div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <span class="badge badge-warning" id="eitaa-status-badge"><span class="badge-dot"></span> تنظیم نشده</span>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="testConnection('eitaa', this)">تست</button>
+        </div>
+      </div>
+
+      <!-- Global Status -->
+      <div class="status-card">
+        <div class="status-card-info">
+          <div class="status-card-icon sys">⚡</div>
+          <div>
+            <div class="status-title">وضعیت سیستم</div>
+            <div class="status-sub" id="sys-status-sub">{{ SYS_STATUS_SUB }}</div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <span class="badge {{ SYS_STATUS_BADGE_CLASS }}" id="sys-status-badge">
+            <span class="badge-dot"></span> {{ SYS_STATUS_BADGE_TEXT }}
+          </span>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="testConnection('all', this)">تست همه</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Advanced Feature Control Toggles Bar -->
+    <div class="control-bar">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <span style="font-size: 24px;">⚙️</span>
+        <div>
+          <b style="font-size: 14.5px;">تنظیمات پیشرفته هوشمند</b>
+          <div style="font-size: 12px; color: var(--text-muted);">کنترل تایید دستی پیش از ارسال، فیلتر تبلیغات و صف تلاش مجدد خودکار</div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+        <!-- Approval Mode Toggle Button -->
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-approval" onclick="toggleFeature('approval', this)">
+          <span>📋</span>
+          <span id="approval-status-text">تایید دستی: در حال بررسی...</span>
+        </button>
+
+        <!-- Ad Filter Toggle Button -->
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-toggle-adfilter" onclick="toggleFeature('adfilter', this)">
+          <span>🛡️</span>
+          <span id="adfilter-status-text">فیلتر تبلیغات: در حال بررسی...</span>
+        </button>
+
+        <!-- Smart Queue Status Badge -->
+        <div class="badge badge-success" style="padding: 6px 12px;">
+          <span>🔄</span>
+          <span>صف هوشمند فعال (۳ بار تلاش مجدد)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Weekly Analytics Charts Section -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="icon">📊</span>
+          <span>آمار تحلیلی و نمودار فعالیت هفتگی (۷ روز گذشته)</span>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+          <span id="week-summary-badge" class="badge badge-success">در حال دریافت آمار...</span>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="loadChartData()">🔄 تازه‌سازی نمودار</button>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 18px; align-items: center;" class="charts-grid">
+        <!-- Main Line/Bar Chart -->
+        <div class="chart-box">
+          <canvas id="channelsWeeklyChart"></canvas>
+        </div>
+
+        <!-- Doughnut / Platform Summary Chart -->
+        <div class="chart-box" style="display: flex; flex-direction: column; justify-content: center; align-items: center;">
+          <div style="font-size: 13px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px;">تفکیک نوع محتوا در هفته</div>
+          <div style="width: 100%; height: 220px; position: relative;">
+            <canvas id="mediaTypesChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Grid -->
+    <div class="layout-grid">
+      <!-- Left Column: The Monitored Channels & Tokens -->
+      <div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">📢</span>
+              <span>کانال‌های تحت مدیریت اختصاصی</span>
+            </div>
+            <button type="button" class="btn btn-primary btn-sm" onclick="toggleAddChannelCard()">
+              ➕ افزودن کانال جدید
+            </button>
+          </div>
+
+          <!-- Add New Channel Form (Collapsible/Interactive) -->
+          <div id="add-channel-panel" style="display: none; background: var(--bg-subtle); border: 2px dashed var(--primary); border-radius: var(--radius-md); padding: 18px; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+              <b style="font-size: 15px; color: var(--primary);">➕ ثبت کانال جدید برای بازنشر</b>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="toggleAddChannelCard()">بستن ✕</button>
+            </div>
+            <form id="add-channel-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">نام یا عنوان کانال (الزامی):</label>
+                  <input type="text" name="title" class="form-input" placeholder="مثال: سیکاپ سلامت" required>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">مبدأ تلگرام (الزامی):</label>
+                  <input type="text" name="telegram_id" class="form-input" placeholder="مثال: @sikaaphealth" required>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">مقصد بله (اختیاری):</label>
+                  <input type="text" name="bale_id" class="form-input" placeholder="مثال: @sikaaphealth">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">مقصد روبیکا (اختیاری):</label>
+                  <input type="text" name="rubika_id" class="form-input" placeholder="مثال: @sikaaphealth">
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">مقصد ایتا (اختیاری):</label>
+                  <input type="text" name="eitaa_id" class="form-input" placeholder="مثال: @sikaaphealth">
+                </div>
+                <div class="form-group" style="display: flex; align-items: flex-end;">
+                  <button type="submit" class="btn btn-primary" style="width: 100%; font-weight: 700;">
+                    ✅ ذخیره و فعال‌سازی کانال
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <!-- Dynamic Channels Container -->
+          <div id="channels-list-container">
+          <!-- Channel 1: Sikaap Health -->
+          <div class="channel-box" id="channel-card-health">
+            <div class="channel-box-header">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 20px;">🏥</span>
+                <b style="font-size: 14.5px; color: var(--accent-cyan);">کانال ۱: سیکاپ هلث (Sikaap Health)</b>
+                <span class="badge badge-success" id="ch-badge-health">فعال</span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="ch-btn-health" onclick="toggleChannel('health', this)">
+                توقف بازنشر
+              </button>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">مبدأ تلگرام:</label>
+                <input type="text" class="form-input" value="@sikaaphealth" readonly>
+              </div>
+              <div class="form-group">
+                <label class="form-label">مقصد بله:</label>
+                <input type="text" class="form-input" value="@sikaaphealth" readonly>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">مقصد روبیکا:</label>
+                <input type="text" class="form-input" value="@sikaaphealth" readonly>
+              </div>
+              <div class="form-group">
+                <label class="form-label">مقصد ایتا:</label>
+                <input type="text" class="form-input" value="@sikaaphealth" readonly>
+              </div>
+            </div>
+          </div>
+
+          <!-- Channel 2: Sikaap Food -->
+          <div class="channel-box" id="channel-card-food">
+            <div class="channel-box-header">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 20px;">🍔</span>
+                <b style="font-size: 14.5px; color: var(--warning);">کانال ۲: سیکاپ فود (Sikaap Food)</b>
+                <span class="badge badge-success" id="ch-badge-food">فعال</span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="ch-btn-food" onclick="toggleChannel('food', this)">
+                توقف بازنشر
+              </button>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">مبدأ تلگرام:</label>
+                <input type="text" class="form-input" value="@sikaapfood" readonly>
+              </div>
+              <div class="form-group">
+                <label class="form-label">مقصد بله:</label>
+                <input type="text" class="form-input" value="@sikaapfood" readonly>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">مقصد روبیکا:</label>
+                <input type="text" class="form-input" value="(غیرفعال)" readonly>
+              </div>
+              <div class="form-group">
+                <label class="form-label">مقصد ایتا:</label>
+                <input type="text" class="form-input" value="(غیرفعال)" readonly>
+              </div>
+            </div>
+          </div>
+
+          <!-- Channel 3: Farayad -->
+          <div class="channel-box" id="channel-card-farayad">
+            <div class="channel-box-header">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 20px;">📚</span>
+                <b style="font-size: 14.5px; color: var(--accent-purple);">کانال ۳: فرایاد (Farayad App)</b>
+                <span class="badge badge-success" id="ch-badge-farayad">فعال</span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="ch-btn-farayad" onclick="toggleChannel('farayad', this)">
+                توقف بازنشر
+              </button>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">مبدأ تلگرام:</label>
+                <input type="text" class="form-input" value="@Farayad_App" readonly>
+              </div>
+              <div class="form-group">
+                <label class="form-label">مقصد بله:</label>
+                <input type="text" class="form-input" value="@Farayad_App" readonly>
+              </div>
+            </div>
+          </div>
+
+          <!-- Channel 4: Yakashef -->
+          <div class="channel-box" id="channel-card-yakashef">
+            <div class="channel-box-header">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 20px;">🌙</span>
+                <b style="font-size: 14.5px; color: var(--success);">کانال ۴: یاکاشف الکرب (بله و روبیکا)</b>
+                <span class="badge badge-success" id="ch-badge-yakashef">فعال</span>
+              </div>
+              <button type="button" class="btn btn-secondary btn-sm" id="ch-btn-yakashef" onclick="toggleChannel('yakashef', this)">
+                توقف بازنشر
+              </button>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">مقصد بله:</label>
+                <input type="text" class="form-input" value="@yakashef_tv" readonly>
+              </div>
+              <div class="form-group">
+                <label class="form-label">مقصد روبیکا:</label>
+                <input type="text" class="form-input" value="@yakashef_admin" readonly>
+              </div>
+            </div>
+          </div>
+          </div>
+        </div>
+
+        <!-- Protected Tokens Card -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">🔒</span>
+              <span>توکن‌های محافظت‌شده (سیستمی)</span>
+            </div>
+            <span class="badge badge-success">ایمن و رمزگذاری شده</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">توکن ربات تلگرام (ثابت و محافظت شده):</label>
+            <input type="password" class="form-input" value="••••••••••••••••••••••••••••••••" readonly>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">توکن بازوی بله (ثابت و محافظت شده):</label>
+            <input type="password" class="form-input" value="••••••••••••••••••••••••••••••••" readonly>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">توکن ربات روبیکا (ثابت و محافظت شده):</label>
+            <input type="password" class="form-input" value="••••••••••••••••••••••••••••••••" readonly>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Direct Publisher, Daily Report, and Live Logs -->
+      <div>
+        <!-- Direct Post Publisher Card -->
+        <div class="card" style="border: 2px solid var(--primary-glow);">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">📮</span>
+              <span>ارسال مستقیم محتوا به کانال‌ها</span>
+            </div>
+            <span class="badge badge-success">ارسال آنی</span>
+          </div>
+          <form id="direct-publish-form">
+            <div class="form-group">
+              <label class="form-label">انتخاب کانال مقصد:</label>
+              <select name="channel_id" class="form-select" id="direct-publish-select">
+                <option value="all">🌐 تمام کانال‌های فعال (سیکاپ هلث، فود، فرایاد، یاکاشف)</option>
+                <option value="health">🏥 سیکاپ هلث (@sikaaphealth)</option>
+                <option value="food">🍔 سیکاپ فود (@sikaapfood)</option>
+                <option value="farayad">📚 فرایاد (@Farayad_App)</option>
+                <option value="yakashef">🌙 یاکاشف الکرب (بله و روبیکا)</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">متن پیام یا کپشن:</label>
+              <textarea name="text" class="form-textarea" placeholder="متن پیام یا کپشن تصویر/ویدیو را اینجا بنویسید... (فیلتر تبلیغات به طور خودکار اعمال می‌شود)"></textarea>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">پیوست فایل، عکس یا ویدیو (اختیاری):</label>
+              <input type="file" name="file" class="form-input" style="padding: 7px;">
+              <small style="font-size: 11.5px; color: var(--text-dim); margin-top: 4px; display: block;">
+                ویدیوهای سنگین بالای ۵۰ مگابایت به صورت خودکار بهینه‌سازی خواهند شد.
+              </small>
+            </div>
+
+            <button type="submit" class="btn btn-primary" style="width: 100%; font-weight: 700;">
+              🚀 انتشار مستقیم محتوا در کانال‌های مقصد
+            </button>
+          </form>
+        </div>
+
+        <!-- Daily 19:00 Report Card -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">📈</span>
+              <span>گزارش روزانه ساعت ۱۹:۰۰ (سیکاپ سوشال)</span>
+            </div>
+            <span class="badge badge-success" id="report-active-badge">فعال</span>
+          </div>
+
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.6;">
+            این ربات هر روز رأس ساعت ۱۹:۰۰ آمار کانال‌ها را شمرده و گزارش جامعی به گروه <b>سیکاپ سوشال</b> در تلگرام ارسال می‌کند.
+          </div>
+
+          <div style="background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px;">
+              <span>👥 گروه مقصد:</span>
+              <b id="report-group-name" style="color: var(--primary);">سیکاپ سوشال</b>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px;">
+              <span>🆔 شناسه گروه:</span>
+              <code id="report-group-id" style="font-size: 12px; font-family: monospace; color: var(--text-dim);">--</code>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 13px;">
+              <span>⏰ زمان ارسال خودکار:</span>
+              <b>هر روز ساعت ۱۹:۰۰</b>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" class="btn btn-primary btn-sm" onclick="sendDailyReportNow(this)" id="send-report-btn" style="flex: 1;">
+              🚀 ارسال فوری گزارش به گروه
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="previewDailyReport()" style="flex: 1;">
+              👁️ پیش‌نمایش گزارش امروز
+            </button>
+          </div>
+
+          <div id="report-preview-box" style="display: none; margin-top: 14px; background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; font-size: 12.5px; white-space: pre-wrap; line-height: 1.6; max-height: 250px; overflow-y: auto;"></div>
+        </div>
+
+        <!-- Live Activity Log -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">📜</span>
+              <span>لاگ لحظه‌ای و تاریخچه بازنشر</span>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="refreshLogs()">به‌روزرسانی</button>
+          </div>
+
+          <div class="log-list" id="log-feed-list">
+            <div style="text-align:center; padding:20px; color:var(--text-dim); font-size:13px;">
+              در حال بارگذاری تاریخچه...
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container"></div>
+
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
