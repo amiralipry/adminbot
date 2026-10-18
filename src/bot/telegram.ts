@@ -1211,44 +1211,6 @@ export class TelegramBotManager {
       }
     });
 
-    // ================= Voice & Audio Transcription (Whisper AI) =================
-    this.bot.on(['message:voice', 'message:audio'], async (ctx, next) => {
-      const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      const fileId = ctx.message.voice?.file_id || ctx.message.audio?.file_id;
-
-      // In groups: if user replies to the bot with a voice or asks bot
-      const replyFromId = ctx.message.reply_to_message?.from?.id;
-      const botId = ctx.me?.id || 0;
-      const isReplyToBot = replyFromId === botId;
-
-      if (isGroup && !isReplyToBot) {
-        return next();
-      }
-
-      // If in group or in private: offer voice-to-text
-      if (fileId && (isReplyToBot || (!isGroup && !this.isAuthorizedAdmin(ctx.from?.username)))) {
-        try {
-          await ctx.replyWithChatAction('typing');
-          const dl = await this.downloadTelegramFile(fileId);
-          const text = await geminiService.transcribeAudio(Buffer.from(dl.data), dl.fileName || 'voice.ogg');
-
-          const replyOptions: any = { reply_to_message_id: ctx.message.message_id };
-          if ((ctx.message as any).message_thread_id) {
-            replyOptions.message_thread_id = (ctx.message as any).message_thread_id;
-          }
-
-          await ctx.reply(`🎙️ <b>متن پیام صوتی:</b>\n\n"${text}"`, {
-            parse_mode: 'HTML',
-            ...replyOptions
-          });
-          return;
-        } catch (err: any) {
-          console.error('[Whisper Error]:', err);
-        }
-      }
-
-      return next();
-    });
 
     // ================= Admin PV Media Uploader (Video/Photo to Yakashef & Channels) =================
     this.bot.on(['message:video', 'message:photo', 'message:document', 'message:animation', 'message:voice', 'message:audio'], async (ctx, next) => {

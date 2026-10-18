@@ -389,37 +389,6 @@ export class GeminiService {
       format: 'jpeg'
     };
   }
-
-  /**
-   * Transcribe audio/voice using GapGPT Whisper (gapgpt/whisper-1)
-   */
-  public async transcribeAudio(audioBuffer: Buffer, fileName = 'audio.mp3'): Promise<string> {
-    const key = config.settings.gapgpt_api_key?.trim();
-    if (!key) {
-      throw new Error('کلید API گپ جی‌پی‌تی برای تبدیل صوت تنظیم نشده است.');
-    }
-
-    const formData = new FormData();
-    const blob = new Blob([audioBuffer], { type: 'audio/mpeg' });
-    formData.append('file', blob, fileName);
-    formData.append('model', 'gapgpt/whisper-1');
-
-    const res = await fetch('https://api.gapgpt.app/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${key}`
-      },
-      body: formData,
-      signal: AbortSignal.timeout(60000)
-    });
-
-    const data = await res.json() as any;
-    if (res.ok && data?.text) {
-      return data.text.trim();
-    }
-
-    throw new Error(data?.error?.message || `خطای سرور GapGPT: ${res.status}`);
-  }
 }
 
 export const geminiService = GeminiService.getInstance();
