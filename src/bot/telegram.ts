@@ -8,7 +8,7 @@ import { dailyReportScheduler } from '../services/scheduler';
 import { geminiService } from '../services/gemini';
 import { postScheduler } from '../services/postScheduler';
 import { botDb } from '../services/db';
-import type { ChannelProfile, PendingApprovalPost } from '../types';
+import type { ChannelProfile, PendingApprovalPost, PlatformResult } from '../types';
 
 export class TelegramBotManager {
   private static instance: TelegramBotManager;
@@ -279,15 +279,53 @@ export class TelegramBotManager {
     if (config.settings.admin_chat_ids) {
       for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
     }
-    if (config.settings.report_group_id) {
-      targetChatIds.add(config.settings.report_group_id);
-    }
 
+    // Failure alerts are sent ONLY to admins in private chat, NEVER to the group
     for (const chatId of targetChatIds) {
       try {
         await this.bot.api.sendMessage(chatId, alertText, { parse_mode: 'HTML' });
       } catch (err) {
-        console.error(`[Telegram] Failed to send failure alert to ${chatId}:`, err);
+        console.error(`[Telegram] Failed to send failure alert to admin ${chatId}:`, err);
+      }
+    }
+  }
+
+  public async sendBroadcastNotification(
+    channel: ChannelProfile,
+    mediaType: string,
+    results: Record<string, PlatformResult>,
+    previewText?: string
+  ): Promise<void> {
+    if (!this.bot || !config.settings.admin_chat_ids || config.settings.admin_chat_ids.length === 0) return;
+
+    const bRes = results.bale;
+    const rRes = results.rubika;
+    const eRes = results.eitaa;
+
+    const bIcon = bRes ? (bRes.success ? '✅ ارسال شد' : (bRes.skipped ? '⚪ غیرفعال' : `❌ خطا (${bRes.error || 'نامشخص'})`)) : '⚪';
+    const rIcon = rRes ? (rRes.success ? '✅ ارسال شد' : (rRes.skipped ? '⚪ غیرفعال' : `❌ خطا (${rRes.error || 'نامشخص'})`)) : '⚪';
+    const eIcon = eRes ? (eRes.success ? '✅ ارسال شد' : (eRes.skipped ? '⚪ غیرفعال' : `❌ خطا (${eRes.error || 'نامشخص'})`)) : '⚪';
+
+    const mediaFa = mediaType === 'video' ? 'ویدیو' : (mediaType === 'photo' ? 'تصویر' : (mediaType === 'text' ? 'متن' : (mediaType === 'album' ? 'آلبوم' : 'فایل')));
+    const snippet = previewText ? `\n\n📝 <b>متن:</b> <i>${previewText.slice(0, 150)}</i>` : '';
+
+    const text = (
+      `🚀 <b>گزارش بازنشر محتوا در پیام‌رسان‌ها</b>\n\n` +
+      `📢 <b>کانال:</b> <b>${channel.title}</b> (<code>${channel.telegram_id}</code>)\n` +
+      `📦 <b>نوع محتوا:</b> ${mediaFa}\n\n` +
+      `📊 <b>وضعیت انتشار:</b>\n` +
+      `▫️ 🍃 <b>بله:</b> ${bIcon}\n` +
+      `▫️ 🟣 <b>روبیکا:</b> ${rIcon}\n` +
+      `▫️ 🟠 <b>ایتا:</b> ${eIcon}` +
+      snippet
+    );
+
+    // Broadcast notifications are sent ONLY to admins in private chat, NEVER to the group
+    for (const chatId of config.settings.admin_chat_ids) {
+      try {
+        await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' });
+      } catch (err) {
+        console.warn(`[Telegram] Failed to send broadcast notification to admin ${chatId}:`, err);
       }
     }
   }
@@ -391,9 +429,6 @@ export class TelegramBotManager {
     if (config.settings.admin_chat_ids) {
       for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
     }
-    if (config.settings.report_group_id) {
-      targetChatIds.add(config.settings.report_group_id);
-    }
 
     let deliveredCount = 0;
     for (const chatId of targetChatIds) {
@@ -410,7 +445,7 @@ export class TelegramBotManager {
 
     if (deliveredCount === 0) {
       console.warn('[Telegram] Approval card could not be delivered to any admin chat. Broadcasting directly to avoid dropping post.');
-      await dispatcher.broadcastForChannel({
+      const results = await dispatcher.broadcastForChannel({
         channel,
         mediaType,
         filePath,
@@ -420,6 +455,7 @@ export class TelegramBotManager {
         source,
         postId
       });
+      await this.sendBroadcastNotification(channel, mediaType, results, msg.caption || msg.text);
     }
   }
 
@@ -474,9 +510,6 @@ export class TelegramBotManager {
     if (config.settings.admin_chat_ids) {
       for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
     }
-    if (config.settings.report_group_id) {
-      targetChatIds.add(config.settings.report_group_id);
-    }
 
     let deliveredCount = 0;
     for (const chatId of targetChatIds) {
@@ -493,13 +526,14 @@ export class TelegramBotManager {
 
     if (deliveredCount === 0) {
       console.warn('[Telegram] Album approval card could not be delivered to any admin chat. Broadcasting directly.');
-      await dispatcher.broadcastAlbumForChannel({
+      const results = await dispatcher.broadcastAlbumForChannel({
         channel,
         items,
         caption,
         source,
         postId
       });
+      await this.sendBroadcastNotification(channel, 'album', results, caption);
     }
   }
 
@@ -602,13 +636,14 @@ export class TelegramBotManager {
       return;
     }
 
-    await dispatcher.broadcastAlbumForChannel({
+    const results = await dispatcher.broadcastAlbumForChannel({
       channel,
       items,
       caption: commonCaption,
       source,
       postId
     });
+    await this.sendBroadcastNotification(channel, 'album', results, commonCaption);
   }
 
   private async processChannelMessage(msg: any, channel: ChannelProfile): Promise<void> {
@@ -654,13 +689,14 @@ export class TelegramBotManager {
 
     // 1. Plain text
     if (!fileId && msg.text) {
-      await dispatcher.broadcastForChannel({
+      const results = await dispatcher.broadcastForChannel({
         channel,
         mediaType: 'text',
         rawText: msg.text,
         source,
         postId
       });
+      await this.sendBroadcastNotification(channel, 'text', results, msg.text);
       return;
     }
 
@@ -668,7 +704,7 @@ export class TelegramBotManager {
     if (fileId) {
       try {
         const { filePath, fileName } = await this.downloadTelegramFileStream(fileId);
-        await dispatcher.broadcastForChannel({
+        const results = await dispatcher.broadcastForChannel({
           channel,
           mediaType,
           filePath,
@@ -677,6 +713,7 @@ export class TelegramBotManager {
           source,
           postId
         });
+        await this.sendBroadcastNotification(channel, mediaType, results, msg.caption);
       } catch (err) {
         console.error('[Telegram] Error downloading or dispatching media:', err);
         statsService.recordPlatformResults({
