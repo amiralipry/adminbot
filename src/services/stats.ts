@@ -90,7 +90,7 @@ export class StatsManager {
         day: 'numeric'
       }).format(dateObj);
 
-      const timeStr = new Intl.DateTimeFormat('fa-IR', {
+      const timeStr = new Intl.DateTimeFormat('en-GB', {
         timeZone: 'Asia/Tehran',
         hour: '2-digit',
         minute: '2-digit',

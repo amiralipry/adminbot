@@ -159,6 +159,7 @@ export class PostScheduleManager {
         }
 
         try {
+          let filePath: string | undefined;
           let fileDataBuffer: ArrayBuffer | undefined;
           let fileName = item.fileName || 'file';
 
@@ -167,8 +168,8 @@ export class PostScheduleManager {
             fileDataBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
           } else if (item.fileId) {
             const { telegramBot } = await import('../bot/telegram');
-            const dl = await (telegramBot as any).downloadTelegramFile(item.fileId);
-            fileDataBuffer = dl.data;
+            const dl = await (telegramBot as any).downloadTelegramFileStream(item.fileId);
+            filePath = dl.filePath;
             fileName = dl.fileName || fileName;
           }
 
@@ -183,6 +184,7 @@ export class PostScheduleManager {
               channel: ch,
               mediaType: item.mediaType,
               fileData: fileDataBuffer,
+              filePath,
               fileName,
               caption: item.caption,
               rawText: item.rawText,

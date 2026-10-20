@@ -179,9 +179,23 @@ export class ConfigManager {
     return ch.is_active;
   }
 
-  public getChannelByTelegram(tgHandleOrUsername: string): ChannelProfile | undefined {
-    const clean = tgHandleOrUsername.toLowerCase().replace(/^@/, '');
-    return this.settings.channels.find(c => c.telegram_id.toLowerCase().replace(/^@/, '') === clean);
+  public getChannelByTelegram(tgHandleOrId: string): ChannelProfile | undefined {
+    if (!tgHandleOrId) return undefined;
+    const clean = tgHandleOrId.toLowerCase().replace(/^@/, '').trim();
+    return this.settings.channels.find(c => {
+      const handleClean = c.telegram_id.toLowerCase().replace(/^@/, '').trim();
+      if (handleClean === clean) return true;
+      if (c.telegram_chat_id && String(c.telegram_chat_id).trim() === clean) return true;
+      return false;
+    });
+  }
+
+  public setChannelTelegramChatId(channelId: string, chatId: string | number): void {
+    const ch = this.settings.channels.find(c => c.id === channelId);
+    if (ch && (!ch.telegram_chat_id || ch.telegram_chat_id !== String(chatId))) {
+      ch.telegram_chat_id = String(chatId);
+      this.save();
+    }
   }
 
   public addAdminChatId(chatId: number): void {

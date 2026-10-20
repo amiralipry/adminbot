@@ -10,6 +10,23 @@ console.log('🚀 ربات بازنشر محتوای چندکاناله (تلگ�
 console.log('⚙️ محیط اجرا: Bun + TypeScript (SQLite + SSE Real-time + Retry Queue)');
 console.log('======================================================================\n');
 
+// Prevent unexpected unhandled network exceptions from crashing the process
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ [Process] Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ [Process] Uncaught Exception:', err);
+});
+
+process.on('exit', (code) => {
+  console.log(`🛑 [Process] Process exited with code: ${code}`);
+});
+
+process.on('beforeExit', (code) => {
+  console.warn(`⚠️ [Process] Event loop empty (beforeExit) with code: ${code}`);
+});
+
 // 1. Start Web Management Panel on port 5000
 if (config.settings.enable_web_dashboard) {
   startWebServer();

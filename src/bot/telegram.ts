@@ -10,6 +10,14 @@ import { postScheduler } from '../services/postScheduler';
 import { botDb } from '../services/db';
 import type { ChannelProfile, PendingApprovalPost, PlatformResult } from '../types';
 
+function escapeHtml(text?: string): string {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 export class TelegramBotManager {
   private static instance: TelegramBotManager;
   public bot: Bot | null = null;
@@ -35,13 +43,31 @@ export class TelegramBotManager {
     return TelegramBotManager.instance;
   }
 
+  private scheduleAutoDeleteMessage(chatId: string | number, messageId: number, delayMs: number = 300000): void {
+    setTimeout(async () => {
+      try {
+        if (this.bot) {
+          await this.bot.api.deleteMessage(chatId, messageId);
+          console.log(`[Telegram] Auto-deleted approval message ${messageId} in chat ${chatId} after ${delayMs / 1000}s`);
+        }
+      } catch (err: any) {
+        console.warn(`[Telegram] Could not auto-delete message ${messageId} in chat ${chatId}:`, err?.message || err);
+      }
+    }, delayMs);
+  }
+
   private isAuthorizedAdmin(input?: any): boolean {
     if (!input) return false;
     let username: string | undefined;
     let userId: number | undefined;
 
     if (typeof input === 'string') {
-      username = input;
+      const trimmed = input.trim();
+      if (/^-?\d+$/.test(trimmed)) {
+        userId = Number(trimmed);
+      } else {
+        username = trimmed;
+      }
     } else if (typeof input === 'number') {
       userId = input;
     } else if (typeof input === 'object') {
@@ -49,13 +75,16 @@ export class TelegramBotManager {
       userId = input.id;
     }
 
-    if (userId && config.settings.admin_chat_ids && config.settings.admin_chat_ids.includes(userId)) {
-      return true;
+    if (userId && config.settings.admin_chat_ids) {
+      const numUserId = Number(userId);
+      if (config.settings.admin_chat_ids.some(id => Number(id) === numUserId)) {
+        return true;
+      }
     }
 
     if (username) {
-      const clean = username.toLowerCase().replace(/^@/, '');
-      const allowed = config.settings.allowed_admin_usernames.map(u => u.toLowerCase().replace(/^@/, ''));
+      const clean = username.toLowerCase().replace(/^@/, '').trim();
+      const allowed = config.settings.allowed_admin_usernames.map(u => u.toLowerCase().replace(/^@/, '').trim());
       if (allowed.includes(clean)) return true;
     }
 
@@ -252,7 +281,7 @@ export class TelegramBotManager {
   }): Promise<void> {
     if (!this.bot) return;
 
-    const platformFa = info.platform === 'bale' ? '🍃 بله' : (info.platform === 'rubika' ? '🟣 روبیکا' : '🟠 ایتا');
+    const platformFa = info.platform === 'bale' ? '🍃 بله' : (info.platform === 'rubika' ? '🟣 روبیکا' : (info.platform === 'eitaa' ? '🟠 ایتا' : '📥 دانلود تلگرام'));
     const mediaFa = info.mediaType === 'video' ? 'ویدیو' : (info.mediaType === 'photo' ? 'تصویر' : (info.mediaType === 'text' ? 'متن' : 'فایل'));
 
     let timeStr = 'لحظاتی پیش';
@@ -279,13 +308,19 @@ export class TelegramBotManager {
     if (config.settings.admin_chat_ids) {
       for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
     }
+    if (config.settings.report_group_id) {
+      targetChatIds.add(config.settings.report_group_id);
+    }
 
-    // Failure alerts are sent ONLY to admins in private chat, NEVER to the group
+    // Failure alerts are sent to admins and to the report group
     for (const chatId of targetChatIds) {
       try {
-        await this.bot.api.sendMessage(chatId, alertText, { parse_mode: 'HTML' });
+        const sentMsg = await this.bot.api.sendMessage(chatId, alertText, { parse_mode: 'HTML' });
+        if (String(chatId) === String(config.settings.report_group_id)) {
+          this.scheduleAutoDeleteMessage(chatId, sentMsg.message_id, 10 * 60 * 1000);
+        }
       } catch (err) {
-        console.error(`[Telegram] Failed to send failure alert to admin ${chatId}:`, err);
+        console.error(`[Telegram] Failed to send failure alert to ${chatId}:`, err);
       }
     }
   }
@@ -307,7 +342,7 @@ export class TelegramBotManager {
     const eIcon = eRes ? (eRes.success ? '✅ ارسال شد' : (eRes.skipped ? '⚪ غیرفعال' : `❌ خطا (${eRes.error || 'نامشخص'})`)) : '⚪';
 
     const mediaFa = mediaType === 'video' ? 'ویدیو' : (mediaType === 'photo' ? 'تصویر' : (mediaType === 'text' ? 'متن' : (mediaType === 'album' ? 'آلبوم' : 'فایل')));
-    const snippet = previewText ? `\n\n📝 <b>متن:</b> <i>${previewText.slice(0, 150)}</i>` : '';
+    const snippet = previewText ? `\n\n📝 <b>متن:</b> <i>${escapeHtml(previewText.slice(0, 150))}</i>` : '';
 
     const text = (
       `🚀 <b>گزارش بازنشر محتوا در پیام‌رسان‌ها</b>\n\n` +
@@ -320,12 +355,30 @@ export class TelegramBotManager {
       snippet
     );
 
-    // Broadcast notifications are sent ONLY to admins in private chat, NEVER to the group
-    for (const chatId of config.settings.admin_chat_ids) {
+    const targetChatIds = new Set<string | number>();
+    if (config.settings.admin_chat_ids) {
+      for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
+    }
+    if (config.settings.report_group_id) {
+      targetChatIds.add(config.settings.report_group_id);
+    }
+
+    // Broadcast notifications are sent to admins and to the report group
+    for (const chatId of targetChatIds) {
       try {
-        await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        const sentMsg = await this.bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' });
+        if (String(chatId) === String(config.settings.report_group_id)) {
+          this.scheduleAutoDeleteMessage(chatId, sentMsg.message_id, 10 * 60 * 1000);
+        }
       } catch (err) {
-        console.warn(`[Telegram] Failed to send broadcast notification to admin ${chatId}:`, err);
+        try {
+          const sentMsg = await this.bot.api.sendMessage(chatId, text.replace(/<[^>]*>/g, ''));
+          if (String(chatId) === String(config.settings.report_group_id)) {
+            this.scheduleAutoDeleteMessage(chatId, sentMsg.message_id, 10 * 60 * 1000);
+          }
+        } catch (innerErr) {
+          console.warn(`[Telegram] Failed to send broadcast notification to ${chatId}:`, err);
+        }
       }
     }
   }
@@ -412,7 +465,7 @@ export class TelegramBotManager {
     this.pendingApprovals.set(approvalId, approvalPost);
 
     const mediaFa = mediaType === 'video' ? 'ویدیو' : (mediaType === 'photo' ? 'تصویر' : (mediaType === 'text' ? 'متن' : 'فایل'));
-    const contentPreview = (msg.text || msg.caption || '(بدون کپشن/متن)').slice(0, 300);
+    const contentPreview = escapeHtml((msg.text || msg.caption || '(بدون کپشن/متن)').slice(0, 300));
 
     const kb = this.getApprovalKeyboard(approvalId);
 
@@ -429,17 +482,48 @@ export class TelegramBotManager {
     if (config.settings.admin_chat_ids) {
       for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
     }
+    if (config.settings.report_group_id) {
+      targetChatIds.add(config.settings.report_group_id);
+    }
 
     let deliveredCount = 0;
     for (const chatId of targetChatIds) {
       try {
-        await this.bot.api.sendMessage(chatId, promptText, {
+        const sentMsg = await this.bot.api.sendMessage(chatId, promptText, {
           parse_mode: 'HTML',
           reply_markup: kb
         });
         deliveredCount++;
+        // If sent to the report group (or any group), auto-delete after 5 minutes (300,000 ms)
+        if (String(chatId) === String(config.settings.report_group_id)) {
+          this.scheduleAutoDeleteMessage(chatId, sentMsg.message_id, 5 * 60 * 1000);
+        }
       } catch (err) {
-        console.error(`[Telegram] Failed to send approval request to ${chatId}:`, err);
+        try {
+          const sentMsg = await this.bot.api.sendMessage(chatId, promptText.replace(/<[^>]*>/g, ''), {
+            reply_markup: kb
+          });
+          deliveredCount++;
+          if (String(chatId) === String(config.settings.report_group_id)) {
+            this.scheduleAutoDeleteMessage(chatId, sentMsg.message_id, 5 * 60 * 1000);
+          }
+        } catch (innerErr) {
+          console.error(`[Telegram] Failed to send approval request to ${chatId}:`, err);
+        }
+      }
+    }
+
+    if (deliveredCount === 0 && config.settings.report_group_id) {
+      try {
+        const sentMsg = await this.bot.api.sendMessage(config.settings.report_group_id, promptText, {
+          parse_mode: 'HTML',
+          reply_markup: kb
+        });
+        deliveredCount++;
+        this.scheduleAutoDeleteMessage(config.settings.report_group_id, sentMsg.message_id, 5 * 60 * 1000);
+        console.log(`[Telegram] Delivered approval card to report group (${config.settings.report_group_id}) as fallback.`);
+      } catch (grpErr) {
+        console.error('[Telegram] Failed to send fallback approval to report group:', grpErr);
       }
     }
 
@@ -482,6 +566,7 @@ export class TelegramBotManager {
         messageId: idx + 1,
         mediaType: it.mediaType,
         fileId: it.fileId,
+        filePath: it.filePath,
         fileName: it.fileName,
         caption: idx === 0 ? caption : undefined
       })),
@@ -495,7 +580,7 @@ export class TelegramBotManager {
     this.pendingApprovals.set(approvalId, approvalPost);
 
     const kb = this.getApprovalKeyboard(approvalId);
-    const contentPreview = (caption || '(بدون کپشن)').slice(0, 300);
+    const contentPreview = escapeHtml((caption || '(بدون کپشن)').slice(0, 300));
 
     const promptText = (
       `📸 <b>آلبوم جدید (${items.length} رسانه) در انتظار تایید ادمین!</b>\n\n` +
@@ -510,17 +595,48 @@ export class TelegramBotManager {
     if (config.settings.admin_chat_ids) {
       for (const id of config.settings.admin_chat_ids) targetChatIds.add(id);
     }
+    if (config.settings.report_group_id) {
+      targetChatIds.add(config.settings.report_group_id);
+    }
 
     let deliveredCount = 0;
     for (const chatId of targetChatIds) {
       try {
-        await this.bot.api.sendMessage(chatId, promptText, {
+        const sentMsg = await this.bot.api.sendMessage(chatId, promptText, {
           parse_mode: 'HTML',
           reply_markup: kb
         });
         deliveredCount++;
+        // If sent to the report group (or any group), auto-delete after 5 minutes (300,000 ms)
+        if (String(chatId) === String(config.settings.report_group_id)) {
+          this.scheduleAutoDeleteMessage(chatId, sentMsg.message_id, 5 * 60 * 1000);
+        }
       } catch (err) {
-        console.error(`[Telegram] Failed to send album approval to ${chatId}:`, err);
+        try {
+          const sentMsg = await this.bot.api.sendMessage(chatId, promptText.replace(/<[^>]*>/g, ''), {
+            reply_markup: kb
+          });
+          deliveredCount++;
+          if (String(chatId) === String(config.settings.report_group_id)) {
+            this.scheduleAutoDeleteMessage(chatId, sentMsg.message_id, 5 * 60 * 1000);
+          }
+        } catch (innerErr) {
+          console.error(`[Telegram] Failed to send album approval to ${chatId}:`, err);
+        }
+      }
+    }
+
+    if (deliveredCount === 0 && config.settings.report_group_id) {
+      try {
+        const sentMsg = await this.bot.api.sendMessage(config.settings.report_group_id, promptText, {
+          parse_mode: 'HTML',
+          reply_markup: kb
+        });
+        deliveredCount++;
+        this.scheduleAutoDeleteMessage(config.settings.report_group_id, sentMsg.message_id, 5 * 60 * 1000);
+        console.log(`[Telegram] Delivered album approval card to report group (${config.settings.report_group_id}) as fallback.`);
+      } catch (grpErr) {
+        console.error('[Telegram] Failed to send fallback album approval to report group:', grpErr);
       }
     }
 
@@ -553,13 +669,13 @@ export class TelegramBotManager {
     const targetPath = join(tempDir, `dl_${Date.now()}_${cleanFileName}`);
 
     const res = await fetch(downloadUrl);
-    if (!res.ok || !res.body) {
+    if (!res.ok) {
       throw new Error(`خطا در دانلود فایل تلگرام: ${res.status}`);
     }
 
-    await Bun.write(targetPath, res);
-    const size = statSync(targetPath).size;
-    return { filePath: targetPath, fileName: rawFileName, fileSize: size };
+    const arrayBuf = await res.arrayBuffer();
+    await Bun.write(targetPath, arrayBuf);
+    return { filePath: targetPath, fileName: rawFileName, fileSize: arrayBuf.byteLength };
   }
 
   private async downloadTelegramFile(fileId: string): Promise<{ data: ArrayBuffer; fileName: string }> {
@@ -714,7 +830,7 @@ export class TelegramBotManager {
           postId
         });
         await this.sendBroadcastNotification(channel, mediaType, results, msg.caption);
-      } catch (err) {
+      } catch (err: any) {
         console.error('[Telegram] Error downloading or dispatching media:', err);
         statsService.recordPlatformResults({
           channel,
@@ -724,6 +840,14 @@ export class TelegramBotManager {
             rubika: { success: false, error: 'خطا در دریافت مدیا' }
           }
         });
+        await this.sendFailureAlert({
+          channel,
+          platform: 'telegram_download',
+          error: `خطا در دریافت فایل از تلگرام: ${err?.message || err}`,
+          mediaType,
+          source,
+          attempts: 1
+        }).catch(() => {});
       }
     }
   }
@@ -755,21 +879,44 @@ export class TelegramBotManager {
       return next();
     });
 
+    // Pre-resolve and cache Telegram numerical chat IDs for all channels
+    for (const ch of config.settings.channels) {
+      if (ch.telegram_id && !ch.telegram_chat_id) {
+        try {
+          const chat = await this.bot.api.getChat(ch.telegram_id);
+          if (chat?.id) {
+            config.setChannelTelegramChatId(ch.id, chat.id);
+            console.log(`[Telegram] Resolved and cached chat ID for "${ch.title}": ${chat.id}`);
+          }
+        } catch (err: any) {
+          console.warn(`[Telegram] Could not resolve chat ID for "${ch.title}" (${ch.telegram_id}):`, err.message || err);
+        }
+      }
+    }
+
     // ================= Channel Post Listener =================
-    this.bot.on('channel_post', async (ctx) => {
-      const chatHandle = ctx.channelPost.chat.username ? `@${ctx.channelPost.chat.username}` : String(ctx.channelPost.chat.id);
-      const matched = config.getChannelByTelegram(chatHandle);
+    this.bot.on(['channel_post', 'edited_channel_post'], async (ctx) => {
+      const post = ctx.channelPost || ctx.editedChannelPost;
+      if (!post) return;
+
+      const chatIdStr = String(post.chat.id);
+      const chatHandle = post.chat.username ? `@${post.chat.username}` : '';
+      
+      let matched = config.getChannelByTelegram(chatIdStr);
+      if (!matched && chatHandle) {
+        matched = config.getChannelByTelegram(chatHandle);
+      }
 
       if (!matched) {
-        console.log(`[Telegram] Post from unmonitored channel: ${chatHandle}`);
+        console.log(`[Telegram] Post from unmonitored channel: ${chatHandle || chatIdStr} (id: ${chatIdStr})`);
         return;
       }
 
       console.log(`[Telegram] Received post for channel "${matched.title}" (${matched.telegram_id})`);
 
       // Album grouping
-      if (ctx.channelPost.media_group_id) {
-        const mgId = ctx.channelPost.media_group_id;
+      if (post.media_group_id) {
+        const mgId = post.media_group_id;
         const existing = this.albumBuffer.get(mgId);
 
         if (!existing) {
@@ -783,15 +930,15 @@ export class TelegramBotManager {
             }
           }, 1500);
 
-          this.albumBuffer.set(mgId, { messages: [ctx.channelPost], timer });
+          this.albumBuffer.set(mgId, { messages: [post], timer });
         } else {
-          existing.messages.push(ctx.channelPost);
+          existing.messages.push(post);
         }
         return;
       }
 
       // Single message (processed in background so it never blocks Telegram update polling)
-      this.processChannelMessage(ctx.channelPost, matched).catch((err) => {
+      this.processChannelMessage(post, matched).catch((err) => {
         console.error('[Telegram] Error in processChannelMessage:', err);
       });
     });
@@ -827,7 +974,7 @@ export class TelegramBotManager {
     });
 
     this.bot.command(['setreport', 'set_report'], async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.reply('⛔ شما دسترسی ادمین ندارید.');
       }
       if (ctx.chat.type === 'private') {
@@ -849,7 +996,7 @@ export class TelegramBotManager {
     // ================= Manual Report Commands =================
     // 1. Send report directly to group
     const handleSendReportToGroup = async (ctx: any) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.reply('⛔ شما دسترسی ادمین ندارید.');
       }
 
@@ -891,7 +1038,7 @@ export class TelegramBotManager {
 
     // 2. View/preview report right here
     const handlePreviewReportHere = async (ctx: any) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.reply('⛔ شما دسترسی ادمین ندارید.');
       }
       const reportHtml = await statsService.generateReportHtml();
@@ -923,7 +1070,7 @@ export class TelegramBotManager {
     ], handleSendReportToGroup);
 
     this.bot.command(['report_status'], async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) return;
+      if (!this.isAuthorizedAdmin(ctx.from)) return;
       await ctx.reply(this.renderDailyReportHtml(), {
         parse_mode: 'HTML',
         reply_markup: this.getDailyReportKeyboard()
@@ -988,7 +1135,7 @@ export class TelegramBotManager {
 
     // ================= Scheduled Posts Command (/scheduled, /schedule) =================
     this.bot.command(['scheduled', 'schedule', 'queue'], async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.reply('⛔ شما دسترسی ادمین ندارید.');
       }
       await this.showScheduledPostsList(ctx);
@@ -1128,7 +1275,7 @@ export class TelegramBotManager {
       const text = ctx.message.text || '';
 
       // Check custom schedule input in private chat
-      if (ctx.chat.type === 'private' && ctx.from && this.isAuthorizedAdmin(ctx.from.username)) {
+      if (ctx.chat.type === 'private' && ctx.from && this.isAuthorizedAdmin(ctx.from)) {
         const schedEntry = this.pendingSchedule.get(String(ctx.from.id));
         if (schedEntry) {
           if (text.startsWith('/cancel') || text === 'انصراف' || text === 'لغو') {
@@ -1239,7 +1386,7 @@ export class TelegramBotManager {
       }
 
       // Check channel addition wizard or approval caption edit in private chat
-      if (ctx.chat.type === 'private' && ctx.from && this.isAuthorizedAdmin(ctx.from.username)) {
+      if (ctx.chat.type === 'private' && ctx.from && this.isAuthorizedAdmin(ctx.from)) {
         const editSession = this.adminEditSessions.get(ctx.from.id);
         if (editSession) {
           if (text.startsWith('/cancel') || text === 'انصراف' || text === 'لغو') {
@@ -1600,7 +1747,7 @@ export class TelegramBotManager {
         return next();
       }
 
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         await ctx.reply('⛔ شما دسترسی ادمین ندارید.');
         return;
       }
@@ -1696,7 +1843,7 @@ export class TelegramBotManager {
 
     // Step 2 of Upload: Select Immediate or Scheduled
     this.bot.callbackQuery(/^cb:up:(.+):(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
 
@@ -1753,7 +1900,7 @@ export class TelegramBotManager {
 
     // Immediate Broadcast Execution
     this.bot.callbackQuery(/^cb:send_now:(.+):(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
 
@@ -1783,7 +1930,7 @@ export class TelegramBotManager {
       } catch {}
 
       try {
-        const { data, fileName } = await this.downloadTelegramFile(pending.fileId);
+        const { filePath, fileName } = await this.downloadTelegramFileStream(pending.fileId);
         const resolvedFileName = pending.fileName || fileName;
 
         const targetChannels = targetId === 'all'
@@ -1810,7 +1957,7 @@ export class TelegramBotManager {
           const results = await dispatcher.broadcastForChannel({
             channel: ch,
             mediaType: pending.mediaType,
-            fileData: data,
+            filePath,
             fileName: resolvedFileName,
             caption: pending.caption || '',
             source: `@${ctx.from?.username || ctx.from?.first_name || 'Admin'}`
@@ -1848,7 +1995,7 @@ export class TelegramBotManager {
 
     // Scheduled Post Options Menu
     this.bot.callbackQuery(/^cb:sched_menu:(.+):(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
 
@@ -1890,7 +2037,7 @@ export class TelegramBotManager {
 
     // Preset Schedule Execution
     this.bot.callbackQuery(/^cb:sched_set:(.+):(.+):(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
 
@@ -1970,7 +2117,7 @@ export class TelegramBotManager {
 
     // Custom Time Prompt
     this.bot.callbackQuery(/^cb:sched_custom:(.+):(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
 
@@ -2008,7 +2155,7 @@ export class TelegramBotManager {
 
     // ================= Callbacks =================
     this.bot.callbackQuery('cb:main_menu', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const userName = ctx.from?.first_name || 'ادمین';
@@ -2023,7 +2170,7 @@ export class TelegramBotManager {
 
     // AI Provider Menu Callbacks
     this.bot.callbackQuery('cb:ai_menu', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       try {
@@ -2036,7 +2183,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:set_ai:(auto|gemini|gemini_backup|gapgpt|gapgpt_gemma|gpt_6_luna)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
 
@@ -2058,7 +2205,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:toggle_global', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const isPaused = config.toggleGlobalPause();
@@ -2075,7 +2222,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:toggle_approval', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const enabled = config.toggleApprovalMode();
@@ -2091,7 +2238,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:toggle_adfilter', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const enabled = config.toggleAdFilter();
@@ -2108,7 +2255,7 @@ export class TelegramBotManager {
 
     // ================= Approval Mode Handlers =================
     this.bot.callbackQuery(/^cb:appr_ok:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2178,6 +2325,12 @@ export class TelegramBotManager {
 
         try {
           await ctx.editMessageText(confirmationMsg, { parse_mode: 'HTML' });
+          if (ctx.chat?.id && String(ctx.chat.id) === String(config.settings.report_group_id)) {
+            const msgId = ctx.callbackQuery?.message?.message_id;
+            if (msgId) {
+              this.scheduleAutoDeleteMessage(ctx.chat.id, msgId, 10 * 60 * 1000);
+            }
+          }
         } catch {}
       } catch (err: any) {
         console.error('[Telegram] Error dispatching approved post:', err);
@@ -2188,7 +2341,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_no:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2214,7 +2367,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_edit:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2241,7 +2394,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_set_edit:(.+):(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2260,7 +2413,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_ai:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2312,7 +2465,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_apply_ai:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2344,7 +2497,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_links:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2379,7 +2532,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_preview:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2405,7 +2558,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:appr_send:(.+):(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const platform = String(ctx.match[1]) as 'bale' | 'rubika' | 'eitaa';
@@ -2421,17 +2574,19 @@ export class TelegramBotManager {
         if (!channel) return ctx.answerCallbackQuery({ text: 'کانال یافت نشد.' });
 
         const targetCaption = pending.perPlatformCaptions?.[platform] || pending.caption;
+        let res: Record<string, PlatformResult> = {};
         if (pending.isAlbum && pending.albumItems) {
-          await dispatcher.broadcastAlbumForChannel({
+          res = await dispatcher.broadcastAlbumForChannel({
             channel,
             items: pending.albumItems,
             caption: targetCaption || '',
             perPlatformCaptions: pending.perPlatformCaptions,
             source: pending.source,
-            postId: pending.postId
+            postId: pending.postId,
+            onlyPlatform: platform
           });
         } else {
-          await dispatcher.broadcastForChannel({
+          res = await dispatcher.broadcastForChannel({
             channel,
             mediaType: pending.mediaType,
             filePath: pending.filePath,
@@ -2440,17 +2595,24 @@ export class TelegramBotManager {
             caption: targetCaption,
             perPlatformCaptions: pending.perPlatformCaptions,
             source: pending.source,
-            postId: pending.postId
+            postId: pending.postId,
+            onlyPlatform: platform
           });
         }
-        await ctx.reply(`✅ پست با موفقیت به صورت اختصاصی به <b>${platFa}</b> ارسال شد!`, { parse_mode: 'HTML' });
+
+        const platRes = res[platform];
+        if (platRes?.success) {
+          await ctx.reply(`✅ پست با موفقیت به صورت اختصاصی به <b>${platFa}</b> ارسال شد!`, { parse_mode: 'HTML' });
+        } else {
+          await ctx.reply(`❌ خطا در ارسال اختصاصی به ${platFa}:\n${platRes?.error || 'ارسال ناموفق بود'}`, { parse_mode: 'HTML' });
+        }
       } catch (err: any) {
         await ctx.reply(`❌ خطا در ارسال به ${platFa}: ${err.message || String(err)}`);
       }
     });
 
     this.bot.callbackQuery(/^cb:appr_back:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const approvalId = String(ctx.match[1]);
@@ -2471,7 +2633,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:test_conns', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       await ctx.answerCallbackQuery({ text: '⏳ در حال بررسی اتصال پیام‌رسان‌ها...' });
@@ -2495,7 +2657,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:add_channel_wizard', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       if (ctx.from) {
@@ -2526,7 +2688,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:ch:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const chId = ctx.match[1];
@@ -2557,7 +2719,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:toggle_ch:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const chId = String(ctx.match[1]);
@@ -2590,7 +2752,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:del_ch_ask:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const chId = String(ctx.match[1]);
@@ -2614,7 +2776,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:del_ch_confirm:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const chId = String(ctx.match[1]);
@@ -2635,7 +2797,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:test_post:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const chId = ctx.match[1];
@@ -2666,7 +2828,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:logs', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
 
@@ -2691,7 +2853,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:daily_report', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       try {
@@ -2704,7 +2866,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:send_report_now', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       await ctx.answerCallbackQuery({ text: '⏳ در حال ارسال گزارش به گروه...' });
@@ -2717,7 +2879,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:preview_report', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const preview = await statsService.generateReportHtml();
@@ -2732,7 +2894,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:toggle_daily_report', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const current = config.settings.daily_report_enabled;
@@ -2761,7 +2923,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery('cb:list_scheduled', async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       await ctx.answerCallbackQuery();
@@ -2769,7 +2931,7 @@ export class TelegramBotManager {
     });
 
     this.bot.callbackQuery(/^cb:cancel_sched:(.+)$/, async (ctx) => {
-      if (!this.isAuthorizedAdmin(ctx.from?.username)) {
+      if (!this.isAuthorizedAdmin(ctx.from)) {
         return ctx.answerCallbackQuery({ text: 'دسترسی غیرمجاز' });
       }
       const id = String(ctx.match[1] || '');
@@ -2786,21 +2948,23 @@ export class TelegramBotManager {
       console.error('[Telegram] Error in update handling:', err.message || err);
     });
 
-    console.log('[Telegram] Starting grammY bot polling...');
     this.isRunning = true;
-
-    try {
-      await this.bot.api.deleteWebhook({ drop_pending_updates: false });
-      await this.bot.start({
-        allowed_updates: ['message', 'channel_post', 'callback_query', 'my_chat_member'],
-        onStart: (info) => {
-          console.log(`[Telegram] Bot started: @${info.username} (id: ${info.id})`);
-        }
-      });
-    } catch (err) {
-      console.error('[Telegram] Polling error:', err);
-    } finally {
-      this.isRunning = false;
+    while (this.isRunning) {
+      try {
+        await this.bot.api.deleteWebhook({ drop_pending_updates: false });
+        console.log('[Telegram] Starting grammY bot polling...');
+        await this.bot.start({
+          allowed_updates: ['message', 'channel_post', 'edited_channel_post', 'callback_query', 'my_chat_member'],
+          onStart: (info) => {
+            console.log(`[Telegram] Bot started: @${info.username} (id: ${info.id})`);
+          }
+        });
+      } catch (err: any) {
+        if (!this.isRunning) break;
+        console.error('[Telegram] Polling interrupted or network error:', err?.message || err);
+        console.log('[Telegram] Reconnecting in 5 seconds...');
+        await new Promise(r => setTimeout(r, 5000));
+      }
     }
   }
 

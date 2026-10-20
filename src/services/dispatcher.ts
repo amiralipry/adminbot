@@ -166,6 +166,7 @@ export class Dispatcher {
     source?: string;
     postId?: string;
     keepTempFile?: boolean;
+    onlyPlatform?: 'bale' | 'rubika' | 'eitaa';
   }): Promise<Record<string, PlatformResult>> {
     let {
       channel,
@@ -178,7 +179,8 @@ export class Dispatcher {
       perPlatformCaptions,
       source = 'Telegram',
       postId = 'post',
-      keepTempFile = false
+      keepTempFile = false,
+      onlyPlatform
     } = params;
 
     if (config.settings.is_paused) {
@@ -204,7 +206,7 @@ export class Dispatcher {
     // Determine payload source (Stream Bun.file from disk if filePath provided, else fileData in memory)
     const mediaPayload: any = filePath ? Bun.file(filePath) : fileData;
 
-    console.log(`[Dispatcher] Dispatching [${mediaType}] for channel "${channel.title}" (${channel.telegram_id}) via ${filePath ? 'Disk-Stream' : 'Memory'}`);
+    console.log(`[Dispatcher] Dispatching [${mediaType}] for channel "${channel.title}" (${channel.telegram_id}) via ${filePath ? 'Disk-Stream' : 'Memory'}${onlyPlatform ? ` [Only: ${onlyPlatform}]` : ''}`);
 
     const results: Record<string, PlatformResult> = {};
     const promises: Promise<void>[] = [];
@@ -215,7 +217,7 @@ export class Dispatcher {
     const eitaaCaption = perPlatformCaptions?.eitaa || this.formatTextForChannel(caption, channel, 'eitaa');
 
     // 1. Bale
-    if (baleService.isEnabled() && channel.bale_id) {
+    if ((!onlyPlatform || onlyPlatform === 'bale') && baleService.isEnabled() && channel.bale_id) {
       promises.push((async () => {
         results.bale = await this.executeWithRetry('bale', async () => {
           if (mediaType === 'text') {
@@ -227,12 +229,14 @@ export class Dispatcher {
           return { success: false, platform: 'bale', error: 'داده‌ای برای ارسال یافت نشد' };
         });
       })());
+    } else if (onlyPlatform && onlyPlatform !== 'bale') {
+      results.bale = { success: false, skipped: true, error: 'ارسال اختصاصی به سایر پلتفرم‌ها انتخاب شده است.' };
     } else {
       results.bale = { success: false, skipped: true, error: 'غیرفعال یا آیدی بله تنظیم نشده' };
     }
 
     // 2. Rubika
-    if (rubikaService.isEnabled() && channel.rubika_id) {
+    if ((!onlyPlatform || onlyPlatform === 'rubika') && rubikaService.isEnabled() && channel.rubika_id) {
       promises.push((async () => {
         results.rubika = await this.executeWithRetry('rubika', async () => {
           if (mediaType === 'text') {
@@ -244,12 +248,14 @@ export class Dispatcher {
           return { success: false, platform: 'rubika', error: 'داده‌ای برای ارسال یافت نشد' };
         });
       })());
+    } else if (onlyPlatform && onlyPlatform !== 'rubika') {
+      results.rubika = { success: false, skipped: true, error: 'ارسال اختصاصی به سایر پلتفرم‌ها انتخاب شده است.' };
     } else {
       results.rubika = { success: false, skipped: true, error: 'غیرفعال یا آیدی روبیکا تنظیم نشده' };
     }
 
     // 3. Eitaa
-    if (eitaaService.isEnabled() && channel.eitaa_id && eitaaService.isConfigured()) {
+    if ((!onlyPlatform || onlyPlatform === 'eitaa') && eitaaService.isEnabled() && channel.eitaa_id && eitaaService.isConfigured()) {
       promises.push((async () => {
         results.eitaa = await this.executeWithRetry('eitaa', async () => {
           if (mediaType === 'text') {
@@ -261,6 +267,8 @@ export class Dispatcher {
           return { success: false, platform: 'eitaa', error: 'داده‌ای برای ارسال یافت نشد' };
         });
       })());
+    } else if (onlyPlatform && onlyPlatform !== 'eitaa') {
+      results.eitaa = { success: false, skipped: true, error: 'ارسال اختصاصی به سایر پلتفرم‌ها انتخاب شده است.' };
     } else {
       results.eitaa = { success: false, skipped: true, error: 'غیرفعال یا توکن ایتا تنظیم نشده' };
     }
@@ -358,9 +366,10 @@ export class Dispatcher {
     perPlatformCaptions?: { bale?: string; rubika?: string; eitaa?: string };
     source?: string;
     postId?: string;
+    onlyPlatform?: 'bale' | 'rubika' | 'eitaa';
   }): Promise<Record<string, PlatformResult>> {
-    const { channel, items, caption = '', perPlatformCaptions, source = 'Telegram', postId = 'album' } = params;
-    console.log(`[Dispatcher] 📸 Broadcasting Media Group Album (${items.length} items) to "${channel.title}"`);
+    const { channel, items, caption = '', perPlatformCaptions, source = 'Telegram', postId = 'album', onlyPlatform } = params;
+    console.log(`[Dispatcher] 📸 Broadcasting Media Group Album (${items.length} items) to "${channel.title}"${onlyPlatform ? ` [Only: ${onlyPlatform}]` : ''}`);
 
     const aggregatedResults: Record<string, PlatformResult> = {
       bale: { success: true, platform: 'bale' },
@@ -383,7 +392,8 @@ export class Dispatcher {
         caption: itemCaption,
         perPlatformCaptions: itemPerPlatformCaptions,
         source,
-        postId: `${postId}_${i + 1}`
+        postId: `${postId}_${i + 1}`,
+        onlyPlatform
       });
 
       for (const [p, r] of Object.entries(res)) {

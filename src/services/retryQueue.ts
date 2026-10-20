@@ -1,3 +1,4 @@
+import { existsSync, unlinkSync } from 'fs';
 import { botDb } from './db';
 import { config } from '../config';
 import { baleService } from './bale';
@@ -74,20 +75,26 @@ export class RetryQueueService {
       if (job.platform === 'bale' && channel.bale_id) {
         if (job.media_type === 'text') {
           result = await baleService.sendText(job.raw_text || '', channel.bale_id);
-        } else if (job.file_path) {
+        } else if (job.file_path && existsSync(job.file_path)) {
           result = await baleService.sendMedia(job.media_type, Bun.file(job.file_path), job.file_name || 'file', job.caption, channel.bale_id);
+        } else {
+          result = { success: false, platform: 'bale', error: 'فایل مدیا برای ارسال مجدد در دیسک یافت نشد.' };
         }
       } else if (job.platform === 'rubika' && channel.rubika_id) {
         if (job.media_type === 'text') {
           result = await rubikaService.sendText(job.raw_text || '', channel.rubika_id);
-        } else if (job.file_path) {
+        } else if (job.file_path && existsSync(job.file_path)) {
           result = await rubikaService.sendMedia(job.media_type, Bun.file(job.file_path), job.file_name || 'file', job.caption, channel.rubika_id);
+        } else {
+          result = { success: false, platform: 'rubika', error: 'فایل مدیا برای ارسال مجدد در دیسک یافت نشد.' };
         }
       } else if (job.platform === 'eitaa' && channel.eitaa_id) {
         if (job.media_type === 'text') {
           result = await eitaaService.sendText(job.raw_text || '', channel.eitaa_id);
-        } else if (job.file_path) {
+        } else if (job.file_path && existsSync(job.file_path)) {
           result = await eitaaService.sendMedia(job.media_type, Bun.file(job.file_path), job.file_name || 'file', job.caption, channel.eitaa_id);
+        } else {
+          result = { success: false, platform: 'eitaa', error: 'فایل مدیا برای ارسال مجدد در دیسک یافت نشد.' };
         }
       } else {
         result = { success: false, platform: job.platform, error: `شناسه کانال در ${job.platform} تعریف نشده است.` };
@@ -99,6 +106,9 @@ export class RetryQueueService {
     if (result.success) {
       console.log(`[RetryQueue] ✅ Job #${job.id} succeeded on attempt ${currentAttempt}!`);
       botDb.completeRetryJob(job.id);
+      if (job.file_path && existsSync(job.file_path) && job.file_path.includes('temp')) {
+        try { unlinkSync(job.file_path); } catch {}
+      }
       statsService.recordPlatformResults({
         channel,
         mediaType: job.media_type,
@@ -107,9 +117,12 @@ export class RetryQueueService {
       eventBus.broadcast('retry', { jobId: job.id, status: 'completed', platform: job.platform, channel: channel.title });
       return true;
     } else {
-      console.warn(`[RetryQueue] ❌ Job #${job.id} failed on attempt ${currentAttempt}: ${result.error}`);
+      console.warn(`[RetryQueue] ❌ Job #${job.id} failed on attempt ${currentAttempt}: ${result.error || 'خطای نامشخص'}`);
       if (currentAttempt >= job.max_attempts) {
         botDb.failRetryJob(job.id, result.error || 'حداکثر تلاش‌ها انجام شد اما ارسال ناموفق بود.');
+        if (job.file_path && existsSync(job.file_path) && job.file_path.includes('temp')) {
+          try { unlinkSync(job.file_path); } catch {}
+        }
         eventBus.broadcast('retry', { jobId: job.id, status: 'failed', platform: job.platform, error: result.error });
       } else {
         // Exponential backoff: 30s, 90s, 270s...

@@ -2,6 +2,7 @@ export interface ChannelProfile {
   id: string; // 'health' | 'food' | 'farayad'
   title: string; // 'سیکاپ هلث' | 'سیکاپ فود' | 'فرایاد'
   telegram_id: string; // '@sikaaphealth' | '@sikaapfood' | '@Farayad_App'
+  telegram_chat_id?: string; // numeric Telegram chat ID e.g. '-1001637399228'
   bale_id: string;
   rubika_id: string;
   eitaa_id?: string;
